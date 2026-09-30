@@ -1,0 +1,26 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  MaterialX Loader addon icon: a shaded sphere on a checkerboard, which is what
+  a material preview looks like on every 3D engine.
+-->
+<svg xmlns="http://www.w3.org/2000/svg" width="128" height="128" viewBox="0 0 128 128">
+  <defs>
+    <radialGradient id="sphere" cx="35%" cy="30%" r="75%">
+      <stop offset="0%" stop-color="#ffffff"/>
+      <stop offset="45%" stop-color="#b9bfc7"/>
+      <stop offset="100%" stop-color="#2f3338"/>
+    </radialGradient>
+    <clipPath id="ball">
+      <circle cx="64" cy="64" r="42"/>
+    </clipPath>
+  </defs>
+
+  <rect width="128" height="128" rx="16" fill="#2b2f36"/>
+
+  <g clip-path="url(#ball)">
+    <rect x="22" y="22" width="84" height="84" fill="url(#sphere)"/>
+    <circle cx="46" cy="44" r="11" fill="#ffffff" opacity="0.75"/>
+  </g>
+
+  <circle cx="64" cy="64" r="42" fill="none" stroke="#e8b14a" stroke-width="5"/>
+</svg>

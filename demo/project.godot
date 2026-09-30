@@ -1,0 +1,39 @@
+; Minimal Godot project for developing and testing the MaterialX Loader addon.
+;
+; The repository root doubles as the demo project, so the addon exists in exactly
+; one place -- there is no demo/addons copy that can drift out of sync. To use
+; the addon elsewhere, copy addons/materialx into your project.
+;
+; Three things are deliberately set up:
+;
+;   * The addon is enabled, so opening this project is enough to see .mtlx files
+;     render as Visual Shaders with material thumbnails.
+;   * A default environment exists. Metals in MaterialX have no diffuse
+;     response -- all of their appearance is reflection -- so with nothing to
+;     reflect, gold and chrome render as black silhouettes. This is the most
+;     common reason a converted material "looks wrong" in a scene, and it has
+;     nothing to do with the conversion.
+;   * materialx/* defaults are written explicitly, though the addon registers
+;     them on first run anyway.
+
+config_version=5
+
+[application]
+
+config/name="MaterialX Loader"
+config/description="MaterialX .mtlx to Godot Visual Shaders. Demo project and test harness for the addon."
+config/features=PackedStringArray("4.7")
+
+[editor_plugins]
+
+enabled=PackedStringArray("res://addons/materialx/plugin.cfg")
+
+[materialx]
+
+texture_roots=PackedStringArray()
+auto_bake_previews=true
+preview_size=128
+
+[rendering]
+
+environment/defaults/default_environment="res://environment/default_environment.tres"

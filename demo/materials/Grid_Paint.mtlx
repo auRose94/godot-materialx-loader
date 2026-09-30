@@ -1,0 +1,60 @@
+<?xml version='1.0' encoding='utf-8'?>
+<!--
+  A deliberately small MaterialX file, written by hand to exercise the paths the
+  other two demo materials do not: an sRGB colour texture driving base_color, a
+  tangent-space normal map, and a roughness texture.
+
+  Together with Gold.mtlx (a pure metal, no textures) and Glass.mtlx
+  (transmission), that covers three quite different conversion routes.
+-->
+<materialx version="1.38">
+  <standard_surface name="SR_gridpaint" type="surfaceshader">
+    <input name="base" type="float" value="1" />
+    <input name="base_color" type="color3">
+      <input name="in" type="color3" nodename="AlbedoImage" />
+    </input>
+    <input name="diffuse_roughness" type="float" value="0.3" />
+    <input name="metalness" type="float" value="0" />
+    <input name="specular" type="float" value="1" />
+    <input name="specular_roughness" type="float" value="0.35" />
+    <input name="specular_IOR" type="float" value="1.5" />
+    <input name="normal">
+      <input name="in" type="vector3" nodename="GridNormalmap" />
+    </input>
+  </standard_surface>
+
+  <surfacematerial name="Grid_Paint" type="material">
+    <input name="surfaceshader" type="surfaceshader" nodename="SR_gridpaint" />
+  </surfacematerial>
+
+  <!-- Base colour.
+
+       colorspace is an annotation on the *file* input, not a separate input.
+       MaterialX's image nodedef (stdlib_defs.mtlx, ND_image_color3) declares no
+       colorspace input, and the convention is to mark the filename itself.
+       Without it the values would be read as linear data and look washed out. -->
+  <image name="AlbedoImage" type="color3">
+    <input name="file" type="filename" value="textures/Demo_Grid.png" colorspace="srgb_texture" />
+    <input name="uaddressmode" type="string" value="periodic" />
+    <input name="vaddressmode" type="string" value="periodic" />
+  </image>
+
+  <image name="GridNormal" type="vector3">
+    <input name="file" type="filename" value="textures/Demo_Ripple_Normal.png" />
+    <input name="uaddressmode" type="string" value="periodic" />
+    <input name="vaddressmode" type="string" value="periodic" />
+  </image>
+
+  <texcoord name="UV" type="vector2" />
+
+  <multiply name="Uvscale" type="vector2">
+    <input name="in1" type="vector2" nodename="UV" />
+    <input name="in2" type="vector2" value="2, 2" />
+  </multiply>
+
+  <normalmap name="GridNormalmap" type="vector3">
+    <input name="in" type="vector3" nodename="GridNormal" />
+    <input name="scale" type="float" value="0.7" />
+    <input name="space" type="string" value="tangent" />
+  </multiply>
+</materialx>

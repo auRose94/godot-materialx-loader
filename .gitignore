@@ -1,0 +1,30 @@
+# Godot's per-project import cache. Regenerated on open; never committed.
+.godot/
+*.translation
+
+# The root of this repository is not a Godot project -- the demo project is --
+# but an editor run in the wrong place can still drop a cache here.
+/.godot/
+
+# Godot's own .gitignore template covers a few things worth keeping even though
+# this repository exports nothing.
+.import/
+export.cfg
+export_credentials.cfg
+.mono/
+data_*/
+mono_crash.*.json
+.nomedia
+
+# Exported builds of the demo project.
+demo/build/
+demo/*.x86_64
+demo/*.exe
+demo/*.dmg
+demo/*.zip
+
+# Editor and OS noise.
+.DS_Store
+Thumbs.db
+*~
+*.swp

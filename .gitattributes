@@ -1,0 +1,18 @@
+# Normalise line endings in the repository, check out LF on every platform.
+# Godot and GDScript are both happy either way, but mixed endings in a text
+# file are a reliable source of pointless diffs.
+* text=auto eol=lf
+
+# Godot's script UID files must keep their exact contents: a resource
+# reference is resolved by the UID inside, and a whitespace change would
+# orphan it.
+*.uid -text
+
+# Binary assets.
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.webp binary
+*.exr binary
+*.hdr binary
+*.mtlx text
