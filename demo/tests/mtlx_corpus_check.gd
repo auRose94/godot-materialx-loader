@@ -5,9 +5,8 @@ extends SceneTree
 ## failures, missing textures, unsupported nodes, and what had to be dropped.
 
 const Emitter := preload("res://addons/materialx/mtlx_emitter.gd")
-const TestKit := preload("res://tests/mtlx_test_kit.gd")
 
-var DIR: String = TestKit.primary_dir()
+const DIR := "res://materials"
 
 var _ok := 0
 var _failed: Array = []
@@ -22,6 +21,8 @@ var _constant_normals := 0
 
 
 func _init() -> void:
+	# Refraction on, so the whole corpus is checked through the new path.
+	ProjectSettings.set_setting("materialx/screen_space_refraction", true)
 	var files := _list(DIR)
 	print("converting %d file(s) from %s\n" % [files.size(), DIR])
 

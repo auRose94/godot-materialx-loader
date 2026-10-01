@@ -51,6 +51,19 @@ const CUSTOM_LIGHTING := PREFIX + "custom_lighting"
 ## The name this setting had while it was opt-in, kept so an existing project
 ## does not silently switch behaviour when it upgrades.
 const LEGACY_CUSTOM_LIGHTING := PREFIX + "experimental_custom_lighting"
+## Refract the scene behind a transmissive surface, in place of fading it out.
+##
+## Off by default while it settles. Godot has no refraction lobe in its spatial
+## BRDF, so a MaterialX `transmission` used to become ALPHA and nothing else --
+## clear glass came out as a uniformly faded shell with a specular highlight on
+## it. Reading the screen texture lets the surface show what is actually behind
+## it, displaced along the refracted vector.
+##
+## The cost is that this material now reads the screen, which Godot treats as
+## alpha-bearing (scene_shader_forward_clustered.cpp:255): it stops casting
+## shadows unless the shader uses a depth prepass. That is the engine's rule, not
+## a choice this addon makes.
+const SCREEN_SPACE_REFRACTION := PREFIX + "screen_space_refraction"
 
 ## Smallest useful thumbnail. Below this the bake costs the same and looks worse.
 const MIN_PREVIEW_SIZE := 32
@@ -87,6 +100,9 @@ static func install_defaults() -> bool:
 	# Registered even though it has a good default, or it never appears in the
 	# Project Settings window at all.
 	wrote = _set_if_missing(CUSTOM_LIGHTING, true, {
+		"type": TYPE_BOOL,
+	}) or wrote
+	wrote = _set_if_missing(SCREEN_SPACE_REFRACTION, false, {
 		"type": TYPE_BOOL,
 	}) or wrote
 	return wrote
@@ -140,3 +156,7 @@ static func preview_size() -> int:
 
 static func custom_lighting() -> bool:
 	return bool(ProjectSettings.get_setting(CUSTOM_LIGHTING, true))
+
+
+static func screen_space_refraction() -> bool:
+	return bool(ProjectSettings.get_setting(SCREEN_SPACE_REFRACTION, false))

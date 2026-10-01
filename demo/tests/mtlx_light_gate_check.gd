@@ -85,6 +85,34 @@ func _init() -> void:
 	_expect(sss.ok, "subsurface material converts")
 	_expect(_light_user_nodes(sss.shader) == 0,
 		"subsurface scattering is refused, since its transmittance is unreachable")
+	# --- the light node's two outputs must reach two different ports ---
+	#
+	# Worth its own assertion because the mistake is silent and the obvious test
+	# cannot see it. The custom node computes a diffuse and a specular term; if
+	# both output ports are fed from its first output, SPECULAR_LIGHT carries the
+	# diffuse value, the specular lobe is never applied, and the diffuse is counted
+	# twice. The shader still compiles and still converts, so every "does it build"
+	# check passes.
+	#
+	# It also survived a render comparison against Godot's own lighting, because
+	# that test hand-built its own connections and so never exercised the
+	# emitter's.
+	var wired := _build(_surface(rough))
+	_expect(wired.ok, "a rough material converts")
+	var light_edges := _light_output_edges(wired.shader)
+	print("  [light stage] output edges: %s" % str(light_edges))
+	_expect(light_edges.size() == 2,
+		"the light node drives both DIFFUSE_LIGHT and SPECULAR_LIGHT")
+	if light_edges.size() == 2:
+		var diffuse_edge: Dictionary = light_edges[0]
+		var specular_edge: Dictionary = light_edges[1]
+		_expect(int(diffuse_edge["from_port"]) == 0
+				and int(diffuse_edge["to_port"]) == 0,
+			"DIFFUSE_LIGHT comes from the node's output 0")
+		_expect(int(specular_edge["from_port"]) == 1
+				and int(specular_edge["to_port"]) == 1,
+			"SPECULAR_LIGHT comes from the node's output 1")
+
 	# --- and the whole library is unharmed ---
 	var all_clear := true
 	for f in _materials():
@@ -157,3 +185,23 @@ func _expect(cond: bool, what: String) -> void:
 	else:
 		_bad += 1
 		print("  FAIL: %s" % what)
+
+
+## The connections landing on the light stage's own output node, as
+## [{from_node, from_port, to_port}]. Reading them from the built shader is the
+## point: it is the emitter's wiring that has to be checked, not a hand-built
+## graph that happens to agree with it.
+func _light_output_edges(shader: VisualShader) -> Array:
+	var out: Array = []
+	for c in shader.get_node_connections(LIGHT):
+		var d: Dictionary = c
+		if int(d["to_node"]) == 0:
+			out.append({
+				"from_node": int(d["from_node"]),
+				"from_port": int(d["from_port"]),
+				"to_port": int(d["to_port"]),
+			})
+	out.sort_custom(func(a, b):
+		return int(a["to_port"]) < int(b["to_port"]))
+	return out
+

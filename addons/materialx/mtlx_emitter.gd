@@ -130,7 +130,10 @@ func _emit_surface(surface: MtlxDocument.MtlxElement) -> void:
 	_fold_into_output(surface, ["emission", "emission_color"], GodotMap.OUT_EMISSION, Vector3.ZERO, "emission")
 	_fold_specular(surface)
 	_fold_anisotropy_flow(surface)
-	_fold_opacity(surface)
+	# Refraction claims `transmission` when it is enabled, so _fold_opacity
+	# must be told whether it is still responsible for it.
+	var refracted: bool = _try_screen_refraction(surface)
+	_fold_opacity(surface, not refracted)
 	_fold_sheen_color(surface)
 	_try_custom_lighting(surface)
 
@@ -139,6 +142,7 @@ func _emit_surface(surface: MtlxDocument.MtlxElement) -> void:
 		"base", "base_color", "emission", "emission_color",
 		"specular", "specular_IOR", "specular_color",
 		"specular_rotation", "opacity", "transmission", "sheen_color",
+		"transmission_color", "transmission_depth", "ior",
 	]
 	for key in GodotMap.SURFACE_PORTS.keys():
 		var name: String = key
@@ -344,6 +348,174 @@ func _fold_anisotropy_flow(surface: MtlxDocument.MtlxElement) -> void:
 	_connect_output(Ref2.new(id, 0), GodotMap.OUT_ANISOTROPY_FLOW)
 
 
+## Screen-space refraction: show what is actually behind a transmissive surface.
+##
+## Godot's spatial BRDF has no refraction lobe. `transmission` therefore used to
+## become ALPHA and nothing else, so clear glass rendered as a uniformly faded
+## shell -- see-through in the sense that the background showed through
+## everywhere equally, with no displacement at all.
+##
+## The screen texture makes a real refraction possible. The uniform comes from a
+## VisualShaderNodeTexture with source = SOURCE_SCREEN, which emits
+##
+##     uniform sampler2D <id>_screen_tex : hint_screen_texture;
+##
+## for a spatial fragment stage (visual_shader_nodes.cpp:778). The parser
+## explicitly allows the hint on spatial rather than canvas-only
+## (shader_language.cpp:10059), and the renderer supplies the buffer
+## (render_forward_clustered.cpp:2369-2373). VisualShaderNodeVectorRefract
+## supplies the vector math, since a VisualShader cannot call the language's
+## refract() directly -- three inputs (incident, normal, eta), one output.
+##
+## The result goes to EMISSION rather than ALPHA. That keeps the material in the
+## opaque pass, which matters: a material that reads the screen counts as
+## alpha-bearing to the renderer (scene_shader_forward_clustered.cpp:255) and
+## then only casts shadows with a depth prepass. Writing ALPHA instead would
+## walk straight into that, and into the sorting problems of a blended shell.
+##
+## Two approximations, both deliberate and both documented:
+##
+## * The refracted vector is in view space, and SCREEN_UV is in screen space.
+##   Only the xy of the refracted direction is used, scaled by a parameter, which
+##   drifts at grazing angles. A true projection needs the screen-space normal and
+##   the viewport scale, which are not reachable as a single node value.
+## * The sample is not masked against the depth buffer, so near a silhouette it
+##   can pull in background from behind the object. SOURCE_DEPTH would fix that
+##   at the cost of a second sampler and a wider node graph.
+func _try_screen_refraction(surface: MtlxDocument.MtlxElement) -> bool:
+	if not Config.screen_space_refraction():
+		return false
+
+	var transmission: Ref2 = _transmission_ref(surface)
+	if not transmission.is_valid():
+		return false
+
+	# Godot refracts about N with the incident vector pointing into the surface,
+	# which is the negated view vector.
+	var normal: int = _add_input("Normal")
+	var view: int = _add_input("View")
+
+	var incident := VisualShaderNodeVectorOp.new()
+	incident.set("operator", GodotMap.VOP_MUL)
+	incident.set("op_type", VisualShaderNodeVectorOp.OP_TYPE_VECTOR_3D)
+	var incident_id: int = _add(incident)
+	_connect(Ref2.new(view, 0), 0, incident_id, 0)
+	incident.set_default_input_values([1, Vector3(-1, -1, -1)])
+
+	# eta is the ratio of refractive indices, n1 / n2. MaterialX gives the
+	# surface IOR directly, so eta = 1 / ior.
+	#
+	# Guarded, because _fop connects any Ref2 it is handed and an invalid one is
+	# not a node -- passing the result of a lookup that found nothing emits a
+	# connection from a node that was never added, which the engine rejects with
+	# "Condition !g->nodes.has(p_from_node) is true" and no useful context.
+	var eta := Ref2.new()
+	var ior_ref: Ref2 = _ior_ref(surface)
+	if ior_ref.is_valid():
+		eta = _fop(GodotMap.FOP_DIV, 1.0, ior_ref)
+
+	var refr := VisualShaderNodeVectorRefract.new()
+	var refr_id: int = _add(refr)
+	_connect(Ref2.new(incident_id, 0), 0, refr_id, 0)
+	_connect(Ref2.new(normal, 0), 0, refr_id, 1)
+	if eta.is_valid():
+		_connect(eta, 0, refr_id, 2)
+	else:
+		refr.set_default_input_values([2, 1.0 / 1.5])
+
+	# offset = refract_dir.xy * refraction_strength, exposed so the strength can be
+	# tuned per material without rebuilding.
+	var strength := VisualShaderNodeFloatParameter.new()
+	strength.parameter_name = _safe_param_name("refraction_strength")
+	strength.default_value_enabled = true
+	strength.default_value = REFRACTION_STRENGTH
+	var strength_id: int = _add(strength)
+
+	# SCREEN_UV is a vec2, so the refracted direction is truncated to its xy by
+	# running the VectorOp in 2D mode. A VectorCompose node would be the obvious
+	# choice and is wrong: it takes one vector and splits it into components, not
+	# the other way round.
+	var xy := VisualShaderNodeVectorOp.new()
+	xy.set("operator", GodotMap.VOP_ADD)
+	xy.set("op_type", VisualShaderNodeVectorOp.OP_TYPE_VECTOR_2D)
+	var xy_id: int = _add(xy)
+	_connect(Ref2.new(refr_id, 0), 0, xy_id, 0)
+	xy.set_default_input_values([1, Vector2.ZERO])
+
+	var scaled := VisualShaderNodeVectorOp.new()
+	scaled.set("operator", GodotMap.VOP_MUL)
+	scaled.set("op_type", VisualShaderNodeVectorOp.OP_TYPE_VECTOR_2D)
+	var scaled_id: int = _add(scaled)
+	_connect(Ref2.new(xy_id, 0), 0, scaled_id, 0)
+	_connect(Ref2.new(strength_id, 0), 0, scaled_id, 1)
+
+	var screen_uv := _add_input("ScreenUV")
+	var offset := VisualShaderNodeVectorOp.new()
+	offset.set("operator", GodotMap.VOP_ADD)
+	offset.set("op_type", VisualShaderNodeVectorOp.OP_TYPE_VECTOR_2D)
+	var offset_id: int = _add(offset)
+	_connect(Ref2.new(screen_uv, 0), 0, offset_id, 0)
+	_connect(Ref2.new(scaled_id, 0), 0, offset_id, 1)
+
+	var screen := VisualShaderNodeTexture.new()
+	screen.source = VisualShaderNodeTexture.SOURCE_SCREEN
+	var screen_id: int = _add(screen)
+	_connect(Ref2.new(offset_id, 0), 0, screen_id, 0)
+
+	# EMISSION = sampled.rgb * transmission, optionally tinted by transmission_color.
+	var gain: Ref2 = transmission
+	var tint: MtlxDocument.MtlxInput = surface.input("transmission_color")
+	if tint != null:
+		var tint_ref: Ref2 = _emit_input(tint, surface.graph)
+		if tint_ref.is_valid():
+			gain = _vop(GodotMap.VOP_MUL, gain, tint_ref)
+	# The screen sample is a vec4 and the gain a scalar or colour, so the
+	# multiply stays in 3D mode: Godot coerces the alpha away with it.
+	var lit: Ref2 = _vop(GodotMap.VOP_MUL, Ref2.new(screen_id, 0), gain)
+
+	_connect_output(lit, GodotMap.OUT_EMISSION)
+
+	_notes.append(
+		"transmission rendered as screen-space refraction; the surface stays "
+		+ "opaque and samples what is behind it")
+	return true
+
+
+## Default strength of the screen-space offset, in SCREEN_UV units. Small on
+## purpose: it is a displacement of the background sample, not a lens.
+const REFRACTION_STRENGTH := 0.02
+
+
+## Adds a fragment-stage input node reading one of the shader's built-ins.
+func _add_input(input_name: String) -> int:
+	var node := VisualShaderNodeInput.new()
+	node.input_name = input_name
+	return _add(node)
+
+
+## VectorOp with a scalar second operand, for the common scale-by-constant case.
+func _vop(op: int, a: Ref2, b: Ref2) -> Ref2:
+	var id: int = _add(VisualShaderNodeVectorOp.new())
+	var node: VisualShaderNodeVectorOp = _node(id)
+	node.set("operator", op)
+	if a.is_valid():
+		_connect(a, a.port, id, 0)
+	if b.is_valid():
+		_connect(b, b.port, id, 1)
+	return Ref2.new(id, 0)
+
+
+## MaterialX's `ior`, which decides how far the background is displaced.
+func _ior_ref(surface: MtlxDocument.MtlxElement) -> Ref2:
+	var inp: MtlxDocument.MtlxInput = surface.input("ior")
+	if inp == null:
+		return Ref2.new()
+	var ref: Ref2 = _emit_input(inp, surface.graph)
+	if not ref.is_valid():
+		return Ref2.new()
+	return ref
+
+
 ## MaterialX `opacity` and `transmission` -> Godot `ALPHA`.
 ##
 ## Two separate sources of see-through-ness:
@@ -368,9 +540,12 @@ func _fold_anisotropy_flow(surface: MtlxDocument.MtlxElement) -> void:
 ## what sells it as glass. It is an approximation, not physics.
 const TRANSMISSION_ALPHA_FLOOR := 0.15
 
-func _fold_opacity(surface: MtlxDocument.MtlxElement) -> void:
+## `include_transmission` is false when screen-space refraction already consumed
+## `transmission`. Doing both would show the background twice: once through the
+## alpha blend and again as the refracted sample added on top.
+func _fold_opacity(surface: MtlxDocument.MtlxElement, include_transmission: bool = true) -> void:
 	var alpha: Ref2 = _opacity_ref(surface)
-	var transmission: Ref2 = _transmission_ref(surface)
+	var transmission: Ref2 = _transmission_ref(surface) if include_transmission else Ref2.new()
 
 	if not alpha.is_valid() and not transmission.is_valid():
 		return
@@ -461,7 +636,10 @@ func _try_custom_lighting(surface: MtlxDocument.MtlxElement) -> bool:
 	# The light node's two outputs go to the light stage's own output ports:
 	# DIFFUSE_LIGHT = 0, SPECULAR_LIGHT = 1.
 	_connect_light(Ref2.new(light_id, 0), 0, OUTPUT_NODE, 0)
-	_connect_light(Ref2.new(light_id, 1), 0, OUTPUT_NODE, 1)
+	# from_port is passed explicitly and overrides the Ref2, so this must be 1 and
+	# not 0 -- otherwise SPECULAR_LIGHT receives the diffuse value and the
+	# specular lobe is lost.
+	_connect_light(Ref2.new(light_id, 1), 1, OUTPUT_NODE, 1)
 
 	_notes.append(
 		"diffuse_roughness evaluated with an Oren-Nayar lobe; this replaces "
