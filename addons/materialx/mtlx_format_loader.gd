@@ -30,7 +30,27 @@ func _get_recognized_extensions() -> PackedStringArray:
 	return PackedStringArray(["mtlx"])
 
 
+## Must answer "" for anything that is not a .mtlx.
+##
+## ResourceLoader::get_resource_type returns the first non-empty answer from any
+## registered loader (core/io/resource_loader.cpp:1389), and it asks every loader
+## about every path. Answering "VisualShader" unconditionally therefore makes this
+## addon claim the type of *every resource in the project* -- including scripts.
+## The editor then asks for res://addons/map_builder/core/brush_geometry.gd as a
+## VisualShader, no loader can produce one, and the failure cascades through every
+## file that preloads it.
+## Must answer "" for anything that is not a .mtlx.
+##
+## ResourceLoader::get_resource_type returns the first non-empty answer from any
+## registered loader (core/io/resource_loader.cpp:1389), and it asks every loader
+## about every path. Answering "VisualShader" unconditionally therefore makes this
+## addon claim the type of *every resource in the project* -- including scripts.
+## The editor then asks for res://addons/map_builder/core/brush_geometry.gd as a
+## VisualShader, no loader can produce one, and the failure cascades through every
+## file that preloads it.
 func _get_resource_type(path: String) -> String:
+	if path.get_extension().to_lower() != "mtlx":
+		return ""
 	return "VisualShader"
 
 
@@ -50,6 +70,14 @@ func _get_resource_script_class(_path: String) -> String:
 ## whole shader graph twice.
 func _get_dependencies(path: String, _add_types: bool) -> PackedStringArray:
 	var deps := PackedStringArray()
+	# Same reason as _get_resource_type: this is asked about paths that are not
+	# ours, and parsing one as MaterialX would only produce a spurious warning.
+	if path.get_extension().to_lower() != "mtlx":
+		return deps
+	# Same reason as _get_resource_type: this is asked about paths that are not
+	# ours, and parsing one as MaterialX would only produce a spurious warning.
+	if path.get_extension().to_lower() != "mtlx":
+		return deps
 	var doc: MtlxDocument = MtlxDocument.load_from_file(path)
 	if doc == null:
 		return deps
