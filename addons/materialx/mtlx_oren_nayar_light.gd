@@ -170,36 +170,17 @@ const _SHADER := """
 		float dielectric = 0.16 * SPECULAR_AMOUNT * SPECULAR_AMOUNT;
 		vec3 f0 = mix(vec3(dielectric), albedo, vec3(metallic));
 
-		// Clearcoat, scene_forward_lights_inc.glsl:207-221. Godot uses the
-		// geometric normal here; NORMAL is the only one a light function can
-		// see, so the clearcoat follows the normal map.
-		float cc_attenuation = 1.0;
-		float clearcoat = CLEARCOAT;
-		if (clearcoat > 0.0) {
-			float cc_rough = mix(0.001, 0.1, clamp(CLEARCOAT_ROUGHNESS, 0.0, 1.0));
-			float cc_NdotH = max(dot(N, H), 0.0);
-			float cc_NdotL = max(dot(N, L), 0.0);
-			float cc_a = cc_NdotH * cc_rough;
-			float cc_k = cc_rough / (1.0 - cc_NdotH * cc_NdotH + cc_a * cc_a);
-			float cc_D = clamp(cc_k * cc_k * (1.0 / 3.14159265), 0.0, 1.0);
-			// V_Kelemen, scene_forward_lights_inc.glsl:89
-			float cc_G = clamp(0.25 / (LdotH * LdotH + 1e-4), 0.0, 1.0);
-			// Schlick, composed the way Godot does at line 217
-			float cc_m = 1.0 - LdotH;
-			float cc_m2 = cc_m * cc_m;
-			float cc_F = mix(0.04, 1.0, cc_m2 * cc_m2 * cc_m) * clearcoat;
-			cc_attenuation = 1.0 - cc_F;
-			specular_light += vec3(cc_D * cc_G * cc_F * cc_NdotL)
-				* LIGHT_COLOR * ATTENUATION * SPECULAR_AMOUNT;
-		}
-
 		// Diffuse, scene_forward_lights_inc.glsl:222-244.
 		//
-		// Godot's line here is `light_color * (NdotL / PI) * attenuation *
+		// Godot's line is `light_color * (NdotL / PI) * attenuation *
 		// cc_attenuation`. This is the same thing scaled by MaterialX's
 		// Oren-Nayar term, which is exactly 1.0 at diffuse_roughness 0, so at
-		// the default this reduces to Godot's expression rather than
+		// the default it reduces to Godot's expression rather than
 		// approximating it.
+		//
+		// There is no cc_attenuation here because this node is only used on
+		// materials with no clearcoat -- the gate refuses the rest, since
+		// CLEARCOAT is not readable from a light function.
 		if (metallic < 1.0) {
 			float NdotL_c = max(dot(N, L), 1e-4);
 			float LdotV = max(dot(L, V), 1e-4);
@@ -211,52 +192,30 @@ const _SHADER := """
 			float diffuse_term = A + B * stinv;
 
 			diffuse_light += albedo * LIGHT_COLOR
-				* (diffuse_term * NdotL / 3.14159265) * ATTENUATION * cc_attenuation;
+				* (diffuse_term * NdotL / 3.14159265) * ATTENUATION;
 		}
 
-		// Rim, scene_forward_lights_inc.glsl:190-194. Godot adds this to the
-		// diffuse response, which is preserved here.
-		float rim = RIM;
-		if (rim > 0.0) {
-			float rim_light = pow(max(1e-4, 1.0 - NdotV), max(0.0, (1.0 - roughness) * 16.0));
-			diffuse_light += rim_light * rim * mix(vec3(1.0), albedo, RIM_TINT) * LIGHT_COLOR;
+		// Backlight, scene_forward_lights_inc.glsl. The one extra lobe that is
+		// readable from a light function.
+		if (BACKLIGHT != vec3(0.0)) {
+			float wrap_d = clamp((dot(N, L) + dot(N, V)) / 2.0, 0.0, 1.0);
+			diffuse_light += pow(wrap_d, 2.0) * BACKLIGHT * LIGHT_COLOR * ATTENUATION;
 		}
 
-		// Specular GGX, scene_forward_lights_inc.glsl:268-292.
+		// Specular GGX, scene_forward_lights_inc.glsl:268-292, isotropic only.
+		// The anisotropic form needs TANGENT and BINORMAL, which a light
+		// function cannot read, so materials that want it are refused instead.
 		float alpha_ggx = roughness * roughness;
-		float D;
-		float Vis;
-		float anisotropy = clamp(ANISOTROPY, 0.0, 0.98);
-		if (anisotropy > 0.0) {
-			// D_GGX_anisotropic, scene_forward_lights_inc.glsl:61
-			vec3 T = normalize(TANGENT);
-			vec3 B = normalize(BINORMAL);
-			float aspect = sqrt(1.0 - anisotropy * 0.9);
-			float ax = alpha_ggx / aspect;
-			float ay = alpha_ggx * aspect;
-			float XdotH = dot(T, H);
-			float YdotH = dot(B, H);
-			float aniso2 = ax * ay;
-			vec3 v = vec3(ay * XdotH, ax * YdotH, aniso2 * NdotH);
-			float v2 = max(dot(v, v), 1e-8);
-			float w2 = aniso2 / v2;
-			D = aniso2 * w2 * w2 * (1.0 / 3.14159265);
 
-			// V_GGX_anisotropic, scene_forward_lights_inc.glsl:69
-			float lambda_v = NdotL * length(vec3(ax * dot(T, V), ay * dot(B, V), NdotV));
-			float lambda_l = NdotV * length(vec3(ax * dot(T, L), ay * dot(B, L), NdotL));
-			Vis = clamp(0.5 / max(lambda_v + lambda_l, 1e-6), 0.0, 1.0);
-		} else {
-			// D_GGX, scene_forward_lights_inc.glsl:18. It is passed alpha_ggx
-			// (Godot does the same at line 278) and k uses 1 - NoH^2, which a
-			// textbook GGX D does not.
-			float a = NdotH * alpha_ggx;
-			float k = alpha_ggx / (1.0 - NdotH * NdotH + a * a);
-			D = clamp(k * k * (1.0 / 3.14159265), 0.0, 1.0);
+		// D_GGX, scene_forward_lights_inc.glsl:18. It is passed alpha_ggx
+		// (Godot does the same at line 278) and k uses 1 - NoH^2, which a
+		// textbook GGX D does not.
+		float a = NdotH * alpha_ggx;
+		float k = alpha_ggx / (1.0 - NdotH * NdotH + a * a);
+		float D = clamp(k * k * (1.0 / 3.14159265), 0.0, 1.0);
 
-			// V_GGX, scene_forward_lights_inc.glsl:56
-			Vis = clamp(0.5 / mix(2.0 * NdotL * NdotV, NdotL + NdotV, alpha_ggx), 0.0, 1.0);
-		}
+		// V_GGX, scene_forward_lights_inc.glsl:56
+		float Vis = clamp(0.5 / mix(2.0 * NdotL * NdotV, NdotL + NdotV, alpha_ggx), 0.0, 1.0);
 
 		// energy_compensation, scene_forward_clustered_inc.glsl:502, with the
 		// DFG term approximated analytically because a light function cannot
@@ -274,7 +233,7 @@ const _SHADER := """
 		vec3 F = f0 + (f90 - f0) * cLdotH5;
 
 		specular_light += energy_compensation * NdotL * D * Vis * F
-			* LIGHT_COLOR * ATTENUATION * cc_attenuation * SPECULAR_AMOUNT;
+			* LIGHT_COLOR * ATTENUATION * SPECULAR_AMOUNT;
 	}
 
 	{diffuse_out} = diffuse_light;

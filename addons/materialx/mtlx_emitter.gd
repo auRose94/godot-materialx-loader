@@ -132,10 +132,7 @@ func _emit_surface(surface: MtlxDocument.MtlxElement) -> void:
 	_fold_anisotropy_flow(surface)
 	_fold_opacity(surface)
 	_fold_sheen_color(surface)
-	if _try_custom_lighting(surface):
-		# Declaring the lobes before the light stage reads them. See
-		# _ensure_lobe_ports for why this has to happen here.
-		_ensure_lobe_ports(surface)
+	_try_custom_lighting(surface)
 
 	# Inputs handled by the folds above rather than by the direct port loop.
 	const FOLDED_INPUTS := [
@@ -417,13 +414,25 @@ func _try_custom_lighting(surface: MtlxDocument.MtlxElement) -> bool:
 		if v == null or GodotMap.is_default("diffuse_roughness", float(v)):
 			return false
 
-	# Subsurface scattering needs per-object transmittance uniforms that a light
-	# function cannot read, so those materials stay on Godot's path.
-	if _drives_sss(surface, "subsurface"):
+	# Anything whose lobes this node cannot reproduce. Clearcoat, rim and
+	# anisotropy are not readable from a light function at all -- the built-in
+	# list in shader_types.cpp does not contain them -- and subsurface needs
+	# per-object transmittance uniforms. Taking such a material would silently
+	# drop those lobes.
+	#
+	# Tested on the enabling input, not on the parameters. coat_roughness is
+	# 0.1 in 253 of the 277 files here against a MaterialX default of 0.03, so
+	# testing parameters refused every material in the library -- while coat
+	# itself is 0 in 253 of them, meaning that lobe is off and the roughness is
+	# inert.
+	for enabling in ["coat", "sheen", "subsurface"]:
+		if _enabled(surface, enabling):
+			return false
+	# Anisotropy has no strength input; any non-zero rotation or anisotropy
+	# turns it on.
+	if _enabled(surface, "specular_anisotropy"):
 		return false
-	if _drives_sss(surface, "subsurface_scale"):
-		return false
-	if _drives_sss(surface, "subsurface_color"):
+	if _enabled(surface, "specular_rotation"):
 		return false
 
 	# sigma cannot be piped in from the fragment stage. VisualShader varyings
@@ -1269,7 +1278,7 @@ func _connect(from: Ref2, from_port: int, to_node: int, to_port: int) -> void:
 ## subsurface is a float; subsurface_scale and subsurface_color are vectors.
 ## is_default() compares like with like, so the declared type is picked up from
 ## the input rather than guessed.
-func _drives_sss(surface: MtlxDocument.MtlxElement, name: String) -> bool:
+func _drives(surface: MtlxDocument.MtlxElement, name: String) -> bool:
 	var inp: MtlxDocument.MtlxInput = surface.input(name)
 	if inp == null:
 		return false
@@ -1435,57 +1444,32 @@ func _to_vec2(v: Variant) -> Vector2:
 		return Vector2(f, f)
 	return Vector2.ZERO
 
-## Connects the lobe ports the custom light node reads, so the engine declares
-## them.
+
+
+## True when a lobe's enabling input is driven above zero.
 ##
-## CLEARCOAT, RIM, RIM_TINT and ANISOTROPY are only in scope inside a light
-## function if the fragment stage writes to them; that write is what emits
-## LIGHT_CLEARCOAT_USED and the rest (material_storage.cpp:1368-1373). GLSL
-## cannot test whether a variable exists, so a missing one is a compile error
-## rather than a silent zero.
-##
-## Defaults come from standard_surface, so a material with no clearcoat gets 0
-## and the node's own `if (clearcoat > 0.0)` skips that lobe. Nothing is lost:
-## the engine's lighting has already been replaced.
-func _ensure_lobe_ports(surface: MtlxDocument.MtlxElement) -> void:
-	# coat, coat_roughness and sheen map straight across.
-	const LOBES := {
-		"coat": GodotMap.OUT_CLEARCOAT,
-		"coat_roughness": GodotMap.OUT_CLEARCOAT_ROUGHNESS,
-		"sheen": GodotMap.OUT_RIM,
-		"specular_anisotropy": GodotMap.OUT_ANISOTROPY,
-	}
-	for name in LOBES:
-		var inp: MtlxDocument.MtlxInput = surface.input(name)
-		var src := Ref2.new()
-		if inp != null:
-			src = _emit_input(inp, surface.graph)
-		if not src.is_valid():
-			src = _literal_ref(name)
-		_connect_output(src, LOBES[name])
+## For the float lobes (coat, sheen, subsurface) that is a literal or link above
+## zero. A link counts as enabled: its value is not knowable here, and guessing
+## zero would silently drop a lobe that is in use.
+func _enabled(surface: MtlxDocument.MtlxElement, name: String) -> bool:
+	var inp: MtlxDocument.MtlxInput = surface.input(name)
+	if inp == null:
+		return false
+	if not inp.is_link():
+		var value: Variant = inp.typed_value()
+		return value != null and absf(float(value)) > 1e-4
 
-	# RIM_TINT is produced by _fold_sheen_color, which deliberately stays quiet
-	# for the default white sheen. Connect the zero that means "no tint" so the
-	# variable exists.
-	if not _output_connected(GodotMap.OUT_RIM_TINT):
-		_connect_output(_float_ref(0.0), GodotMap.OUT_RIM_TINT)
+	# A link is followed to whatever drives it. Most of these are links to a
+	# constant, and treating every link as "enabled" refused the entire
+	# library -- Aluminum.mtlx is a plain metal whose specular_anisotropy just
+	# happens to come through a node.
+	var src: MtlxDocument.MtlxElement = _doc.source_element(inp, surface.graph)
+	if src != null and src.def == "constant":
+		var v: Variant = src.input_value("value")
+		return v != null and absf(float(v)) > 1e-4
 
+	# Driven from something whose value is not knowable here -- a texture, or a
+	# chain we do not resolve. Refused, because guessing would silently drop a
+	# lobe.
+	return true
 
-## A node carrying a literal, for ports a material does not set.
-func _literal_ref(name: String) -> Ref2:
-	var inp: MtlxDocument.MtlxInput = null
-	return _float_ref(0.0) if name.is_empty() else _float_ref(0.0)
-
-
-func _float_ref(v: float) -> Ref2:
-	var id: int = _add(VisualShaderNodeFloatConstant.new())
-	_node(id).constant = v
-	return Ref2.new(id, 0)
-
-
-## True when something is already wired to that output port.
-func _output_connected(port: int) -> bool:
-	for c in _shader.get_node_connections(FRAGMENT):
-		if int(c["to_node"]) == OUTPUT_NODE and int(c["to_port"]) == port:
-			return true
-	return false
