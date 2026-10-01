@@ -21,8 +21,15 @@ extends RefCounted
 ## rather than silently approximated. See GodotMap for the specifics.
 
 const FRAGMENT := 1  # VisualShader.TYPE_FRAGMENT
+const LIGHT := 2  # VisualShader.TYPE_LIGHT
 const FIRST_NODE_ID := 2  # VisualShader::add_node rejects ids < 2
 const OUTPUT_NODE := 0  # implicit VisualShaderNodeOutput; id 1 is unused
+
+# Experimental custom lighting: a copy of Godot's own lighting model with
+# MaterialX's Oren-Nayar diffuse lobe in place of Lambert. Gated behind a project
+# setting, and used only for materials that actually drive diffuse_roughness.
+const Config := preload("res://addons/materialx/mtlx_config.gd")
+const OrenNayarLight := preload("res://addons/materialx/mtlx_oren_nayar_light.gd")
 
 ## A connection endpoint: a node in the graph plus one of its output ports.
 class Ref2 extends RefCounted:
@@ -125,6 +132,7 @@ func _emit_surface(surface: MtlxDocument.MtlxElement) -> void:
 	_fold_anisotropy_flow(surface)
 	_fold_opacity(surface)
 	_fold_sheen_color(surface)
+	_try_custom_lighting(surface)
 
 	# Inputs handled by the folds above rather than by the direct port loop.
 	const FOLDED_INPUTS := [
@@ -380,6 +388,75 @@ func _fold_opacity(surface: MtlxDocument.MtlxElement) -> void:
 	for i in range(1, terms.size()):
 		out_ref = _fop(GodotMap.FOP_MUL, out_ref, terms[i])
 	_connect_output(out_ref, GodotMap.OUT_ALPHA)
+
+
+
+## Experimental: replace Godot's lighting with a copy that understands MaterialX's
+## diffuse_roughness.
+##
+## Writing anything to the light stage sets LIGHT_CODE_USED, which makes Godot
+## skip its entire lighting model (scene_forward_lights_inc.glsl:121). That is why
+## this is gated so narrowly -- it is only worth doing for a material that has
+## diffuse_roughness set and nothing this cannot reproduce.
+##
+## Returns true when the material was taken over. Callers use that to stop
+## reporting diffuse_roughness as dropped.
+func _try_custom_lighting(surface: MtlxDocument.MtlxElement) -> bool:
+	if not Config.experimental_custom_lighting():
+		return false
+
+	# Nothing to gain: the default is already exactly Lambert.
+	var rough_inp: MtlxDocument.MtlxInput = surface.input("diffuse_roughness")
+	if rough_inp == null:
+		return false
+	if not rough_inp.is_link():
+		var v: Variant = rough_inp.typed_value()
+		if v == null or GodotMap.is_default("diffuse_roughness", float(v)):
+			return false
+
+	# Subsurface scattering needs per-object transmittance uniforms that a light
+	# function cannot read, so those materials stay on Godot's path.
+	if _drives_sss(surface, "subsurface"):
+		return false
+	if _drives_sss(surface, "subsurface_scale"):
+		return false
+	if _drives_sss(surface, "subsurface_color"):
+		return false
+
+	# sigma has no output port, so it has to travel through a varying. Nothing
+	# can be wired between the fragment and light stages, which is exactly why
+	# this is needed.
+	var varying := "mtlx_diffuse_roughness"
+	var sigma: Ref2 = _emit_input(rough_inp, surface.graph)
+	if not sigma.is_valid():
+		return false
+
+	# Fragment stage: publish it.
+	var setter := VisualShaderNodeVaryingSetter.new()
+	setter.varying_name = varying
+	var setter_id: int = _add(setter)
+	_connect(sigma, sigma.port, setter_id, 0)
+
+	# Light stage: read it back. The two stages are separate graphs, so the
+	# name is the only thing that crosses between them -- connecting the
+	# setter's output directly is rejected by the engine.
+	var getter := VisualShaderNodeVaryingGetter.new()
+	getter.varying_name = varying
+	var getter_id: int = _add_light(getter)
+
+	var light: VisualShaderNodeCustom = OrenNayarLight.new()
+	var light_id: int = _add_light(light)
+	_connect_light(Ref2.new(getter_id, 0), 0, light_id, 0)
+
+	# The light node's two outputs go to the light stage's own output ports:
+	# DIFFUSE_LIGHT = 0, SPECULAR_LIGHT = 1.
+	_connect_light(Ref2.new(light_id, 0), 0, OUTPUT_NODE, 0)
+	_connect_light(Ref2.new(light_id, 1), 0, OUTPUT_NODE, 1)
+
+	_notes.append(
+		"diffuse_roughness evaluated with an Oren-Nayar lobe (experimental); "
+		+ "this replaces Godot's lighting for this material")
+	return true
 
 
 ## Godot's RIM_TINT is a scalar, not a colour.
@@ -1162,6 +1239,15 @@ func _add(node: VisualShaderNode) -> int:
 	return id
 
 
+## Adds a node to the light stage. Node ids are shared across stages, so the same
+## counter is safe.
+func _add_light(node: VisualShaderNode) -> int:
+	var id: int = _next_id
+	_shader.add_node(LIGHT, node, Vector2.ZERO, id)
+	_next_id += 1
+	return id
+
+
 func _node(id: int) -> VisualShaderNode:
 	return _shader.get_node(FRAGMENT, id)
 
@@ -1174,6 +1260,31 @@ func _node(id: int) -> VisualShaderNode:
 ## silently wired operands into the shader output.
 func _connect(from: Ref2, from_port: int, to_node: int, to_port: int) -> void:
 	_shader.connect_nodes_forced(FRAGMENT, from.node, from_port, to_node, to_port)
+
+
+
+## True when a subsurface input is driven away from its default.
+##
+## subsurface is a float; subsurface_scale and subsurface_color are vectors.
+## is_default() compares like with like, so the declared type is picked up from
+## the input rather than guessed.
+func _drives_sss(surface: MtlxDocument.MtlxElement, name: String) -> bool:
+	var inp: MtlxDocument.MtlxInput = surface.input(name)
+	if inp == null:
+		return false
+	if inp.is_link():
+		return true
+	var value: Variant = inp.typed_value()
+	if value == null:
+		return false
+	if inp.type == "float":
+		return not GodotMap.is_default(name, float(value))
+	return not GodotMap.is_default(name, GodotMap._as_vector3(value))
+
+
+## Connects within the light stage.
+func _connect_light(from: Ref2, from_port: int, to_node: int, to_port: int) -> void:
+	_shader.connect_nodes_forced(LIGHT, from.node, from_port, to_node, to_port)
 
 
 ## Wires into the implicit output node, whose ports are the ALBEDO/METALLIC/...

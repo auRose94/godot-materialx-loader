@@ -25,6 +25,16 @@ const TEXTURE_ROOTS := PREFIX + "texture_roots"
 const AUTO_BAKE := PREFIX + "auto_bake_previews"
 ## Edge length of a baked thumbnail, in pixels.
 const PREVIEW_SIZE := PREFIX + "preview_size"
+## Experimental: evaluate MaterialX diffuse_roughness with an Oren-Nayar lobe.
+##
+## Off by default. When on, a material that drives diffuse_roughness away from
+## the default (and does not use subsurface scattering) gets Godot's whole
+## lighting model reimplemented in the light stage, with the Lambert term
+## replaced. At diffuse_roughness 0 that is identical to Godot's own path, so
+## this is a real substitution rather than an approximation -- but it is still
+## a copy of engine code, and engine code changes. Treat it as a preview of
+## what this addon could do, not as settled behaviour.
+const EXPERIMENTAL_CUSTOM_LIGHTING := PREFIX + "experimental_custom_lighting"
 
 ## Smallest useful thumbnail. Below this the bake costs the same and looks worse.
 const MIN_PREVIEW_SIZE := 32
@@ -87,3 +97,7 @@ static func preview_size() -> int:
 	# result is downscaled to the dock's thumbnail anyway.
 	var raw := int(ProjectSettings.get_setting(PREVIEW_SIZE, 128))
 	return clampi(raw, MIN_PREVIEW_SIZE, MAX_PREVIEW_SIZE)
+
+
+static func experimental_custom_lighting() -> bool:
+	return bool(ProjectSettings.get_setting(EXPERIMENTAL_CUSTOM_LIGHTING, false))

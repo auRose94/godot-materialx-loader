@@ -308,10 +308,34 @@ static func is_default(name: String, value: Variant) -> bool:
 	if not SURFACE_DEFAULTS.has(name):
 		return false
 	var want: Variant = SURFACE_DEFAULTS[name]
+
 	if value is bool or want is bool:
 		return bool(value) == bool(want)
-	if value is Vector3 and want is Vector3:
-		return (value as Vector3).is_equal_approx(want as Vector3)
+
+	# MaterialX files are not consistent about scalar vs vector for the same
+	# input: this library writes subsurface_scale as a bare number while the
+	# nodedef declares it vector3. So the recorded default can be a Vector3
+	# when the decoded value is a scalar, or the reverse. Rather than compare
+	# like with like and risk an invalid-operand error inside a predicate that
+	# is only ever asking "is this worth reporting", reduce both sides to a
+	# scalar when their shapes disagree.
 	if value is float or value is int:
-		return is_equal_approx(float(value), float(want))
+		return is_equal_approx(float(value), _scalar_of(want))
+	if value is Vector3:
+		var w3: Vector3 = want if want is Vector3 else Vector3(_scalar_of(want), _scalar_of(want), _scalar_of(want))
+		return (value as Vector3).is_equal_approx(w3)
+
 	return value == want
+
+
+## The scalar a recorded default reduces to, whatever its declared shape.
+static func _scalar_of(want: Variant) -> float:
+	if want is float or want is int:
+		return float(want)
+	if want is Vector3:
+		# luminance, so a grey vector compares like the scalar it stands for
+		var v: Vector3 = want
+		return v.dot(Vector3(0.2126, 0.7152, 0.0722))
+	if want is bool:
+		return 1.0 if bool(want) else 0.0
+	return 0.0
