@@ -27,7 +27,7 @@ var _live_picker: OptionButton
 var _bake_btn: Button
 var _auto: CheckBox
 var _bake_progress: Label
-var _experimental: CheckBox
+var _custom_lighting: CheckBox
 var _rebake_all_btn: Button
 var _clear_cache_btn: Button
 var _cache_info: Label
@@ -143,16 +143,17 @@ func _ready() -> void:
 	# Experimental custom lighting. Kept next to Auto-bake rather than only in
 	# Project Settings, because it is the one setting people need to flip in
 	# order to see what it does.
-	_experimental = CheckBox.new()
-	_experimental.text = "Experimental: Oren-Nayar diffuse"
-	_experimental.tooltip_text = (
-		"Evaluate MaterialX diffuse_roughness with an Oren-Nayar lobe. This "
-		+ "replaces Godot's whole lighting model for materials that use it, "
-		+ "because a light function replaces the engine's. Rebuild previews "
-		+ "after changing this.")
-	_experimental.button_pressed = Config.experimental_custom_lighting()
-	_experimental.toggled.connect(_on_experimental_toggled)
-	body.add_child(_experimental)
+	_custom_lighting = CheckBox.new()
+	_custom_lighting.text = "Oren-Nayar diffuse (MaterialX)"
+	_custom_lighting.tooltip_text = (
+		"Evaluate MaterialX diffuse_roughness with an Oren-Nayar lobe, which "
+		+ "Godot has no equivalent for. This replaces Godot's whole lighting "
+		+ "model for materials that use it, because a light function replaces "
+		+ "the engine's -- so the addon, not the engine, is responsible for "
+		+ "the result. Rebuild previews after changing this.")
+	_custom_lighting.button_pressed = Config.custom_lighting()
+	_custom_lighting.toggled.connect(_on_custom_lighting_toggled)
+	body.add_child(_custom_lighting)
 
 	var cache_title := Label.new()
 	cache_title.text = "Preview cache"
@@ -316,13 +317,13 @@ func _on_clear_cache() -> void:
 
 ## Flipping this changes the emitted shader, so anything already loaded keeps
 ## its old graph until it is rebuilt. Say so rather than leaving it to be found.
-func _on_experimental_toggled(on: bool) -> void:
-	ProjectSettings.set_setting(Config.EXPERIMENTAL_CUSTOM_LIGHTING, on)
+func _on_custom_lighting_toggled(on: bool) -> void:
+	ProjectSettings.set_setting(Config.CUSTOM_LIGHTING, on)
 	ProjectSettings.save()
 	if on:
-		_status.text = "Experimental lighting on -- rebuild previews to see it"
+		_status.text = "Oren-Nayar diffuse on -- rebuild previews to see it"
 	else:
-		_status.text = "Experimental lighting off -- rebuild previews to apply"
+		_status.text = "Oren-Nayar diffuse off -- rebuild previews to apply"
 
 
 func _on_bake_progress(done: int, total: int, current: String) -> void:

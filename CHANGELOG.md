@@ -5,6 +5,51 @@ All notable changes to this project are documented here.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 the project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.1.0] — 2026-09-30
+
+### Fixed
+
+- **The custom light node multiplied by albedo twice.** Godot applies albedo
+  after the light loop, not inside it (`scene_forward_clustered.glsl:3048`), so
+  a material with a non-zero `diffuse_roughness` was rendering with its base
+  colour squared. Rendering the node against Godot's own path measured it: a
+  mean error of 0.024 per channel across the frame, against 0.006 once fixed.
+  The node now follows Godot's structure, which also means ambient occlusion and
+  the metallic blend must *not* be applied there — the renderer does both, and
+  the node is inside the loop.
+
+### Changed
+
+- **Oren-Nayar diffuse is on by default**, and the setting is no longer called
+  experimental. It was off by default *and* undocumented, which made a working
+  feature invisible: no settings table entry, no README section, nothing but a
+  dock checkbox nobody would think to look for.
+
+  The lobe is MaterialX's own answer and Godot has no equivalent, so leaving it
+  off silently rendered those materials with Lambert and dropped the roughness
+  the file asked for. The Oren-Nayar term matches MaterialX's
+  `mx_oren_nayar_diffuse` verbatim.
+
+  `materialx/experimental_custom_lighting` becomes
+  `materialx/custom_lighting`. An existing value is migrated on first load, so
+  upgrading never silently changes how a project renders.
+
+- The limitation that `diffuse_roughness` is dropped has been rewritten. It was
+  accurate when the setting was off and wrong the moment it was on.
+
+### Added
+
+- A README section on what the Oren-Nayar path actually does, and what it costs:
+  the material's lighting comes from this addon rather than from Godot, and
+  ambient is not darkened by the directional albedo because Godot computes it in
+  the fragment stage where a light function cannot reach it.
+- `mtlx_config_check.gd`, guarding the new default and the key migration.
+- `mtlx_light_equiv_check.gd`, which renders the node against Godot's own path
+  and separates the diffuse and specular lobes by differencing two albedo
+  values. This is what caught the double-albedo bug.
+- `mtlx_gate_count.gd` and `mtlx_gate_diag.gd`, which show what the gate
+  actually accepts and why, rather than asserting that it accepts everything.
+
 ## [1.0.0] — 2026-09-30
 
 ### Added (unreleased)

@@ -402,7 +402,7 @@ func _fold_opacity(surface: MtlxDocument.MtlxElement) -> void:
 ## Returns true when the material was taken over. Callers use that to stop
 ## reporting diffuse_roughness as dropped.
 func _try_custom_lighting(surface: MtlxDocument.MtlxElement) -> bool:
-	if not Config.experimental_custom_lighting():
+	if not Config.custom_lighting():
 		return false
 
 	# Nothing to gain: the default is already exactly Lambert.
@@ -464,8 +464,8 @@ func _try_custom_lighting(surface: MtlxDocument.MtlxElement) -> bool:
 	_connect_light(Ref2.new(light_id, 1), 0, OUTPUT_NODE, 1)
 
 	_notes.append(
-		"diffuse_roughness evaluated with an Oren-Nayar lobe (experimental); "
-		+ "this replaces Godot's lighting for this material")
+		"diffuse_roughness evaluated with an Oren-Nayar lobe; this replaces "
+		+ "Godot's lighting for this material")
 	return true
 
 

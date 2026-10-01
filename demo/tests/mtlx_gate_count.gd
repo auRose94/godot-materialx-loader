@@ -1,7 +1,7 @@
 extends SceneTree
 
 ## Counts, empirically, how many corpus materials actually get the custom light
-## node when experimental_custom_lighting is forced on.
+## node when custom_lighting is forced on.
 ##
 ## The gate-diag tool explained the refusals in isolation; this one builds every
 ## material for real and counts, so the two agree. It also asserts the thing that
@@ -11,7 +11,7 @@ extends SceneTree
 const Emitter := preload("res://addons/materialx/mtlx_emitter.gd")
 
 const DIR := "res://materials"
-const FLAG := "materialx/experimental_custom_lighting"
+const FLAG := "materialx/custom_lighting"
 const LIGHT_STAGE := 2  # VisualShader.TYPE_LIGHT
 
 var _bad := 0

@@ -50,6 +50,16 @@ All optional; the defaults work with no configuration.
 | `materialx/texture_roots` | `[]` | Extra directories to search for textures, tried before the `.mtlx`'s own directory. Leave empty for relative-to-source resolution. |
 | `materialx/auto_bake_previews` | `true` | Render thumbnails with the real shader in the background. |
 | `materialx/preview_size` | `128` | Edge length in pixels of a baked thumbnail. |
+| `materialx/custom_lighting` | `true` | Evaluate `diffuse_roughness` with an Oren-Nayar lobe. On by default because the lobe is MaterialX's own answer and Godot has no equivalent; turning it off falls back to Godot's Lambert. See [Oren-Nayar diffuse](#oren-nayar-diffuse) for what this costs. |
+
+Materials with a non-zero `diffuse_roughness` have Godot's whole lighting model
+replaced in the light stage, so for those the addon, not the engine, is
+responsible for the result. If you would rather have Godot's own BRDF, that
+setting is the escape hatch.
+
+This was `materialx/experimental_custom_lighting` and defaulted to off before
+1.1.0. An existing value is migrated on first load, so upgrading never silently
+changes how your materials render.
 
 ## Using the dock
 
@@ -95,6 +105,45 @@ Environment → Default Environment`). Any sky or IBL works; the demo project
 ships one. Baked thumbnails use that same environment, so thumbnails and scenes
 match.
 
+## Oren-Nayar diffuse
+
+Godot's spatial BRDF has no Oren-Nayar diffuse, so a MaterialX material with a
+non-zero `diffuse_roughness` would be rendered with Lambert and quietly lose the
+roughness the file asked for. This addon evaluates the lobe instead, by
+transcribing Godot's lighting into a light function with the Oren-Nayar term in
+place of Lambert.
+
+The transcription is Godot's, not a reimplementation: `D_GGX`, `V_GGX`,
+`SchlickFresnel`, the energy-compensation term and the backlight lobe are taken
+from `scene_forward_lights_inc.glsl` and `scene_forward_clustered.glsl`, so the
+material still tracks the engine when the engine changes. The only substituted
+term is
+
+```glsl
+float sigma2 = mx_square(diffuse_roughness);
+float A = 1.0 - 0.5 * (sigma2 / (sigma2 + 0.33));
+float B = 0.45 * sigma2 / (sigma2 + 0.09);
+diffuse_brdf_NL = (A + B * stinv) * NdotL / M_PI;
+```
+
+which is MaterialX's `mx_oren_nayar_diffuse` verbatim
+(`mx_microfacet_diffuse.glsl:8`).
+
+Two consequences worth knowing:
+
+- **The material's lighting comes from this addon, not from Godot.** Writing to
+  the light stage sets `LIGHT_CODE_USED`, which makes the engine skip its entire
+  lighting model (`scene_forward_lights_inc.glsl:121`). Anything the
+  transcription does not cover disappears without an error, which is why the gate
+  in [Known limitations](#known-limitations) refuses a material with lobes a
+  light function cannot read rather than rendering half of it.
+- **Ambient is not darkened to match.** MaterialX scales indirect diffuse by the
+  directional albedo; Godot computes ambient in the fragment stage, where the
+  light function cannot reach it. On a high-`diffuse_roughness` material the
+  ambient reads slightly too bright relative to the direct light.
+
+Set `materialx/custom_lighting` to `false` to fall back to Godot's own BRDF.
+
 ## Known limitations
 
 These are honest limits of the conversion, not bugs. They are all detected and
@@ -102,7 +151,9 @@ reported in the dock rather than silently approximated.
 
 | Input | Why it is dropped |
 |---|---|
-| `diffuse_roughness` | Oren-Nayar needs the light and view vectors per light, so it can only be evaluated in the light stage. Writing `Diffuse Light` sets `LIGHT_CODE_USED`, which makes Godot skip its *entire* lighting model (`scene_forward_lights_inc.glsl:121`). Matching it would mean reimplementing specular, clearcoat, rim, anisotropy and SSS, and drifting from Godot whenever its BRDF changes. Not worth it for a diffuse-only refinement. |
+| `diffuse_roughness`, when computed rather than written as a literal | Oren-Nayar can only be evaluated in the light stage, and a value computed in a nodegraph has to be a constant there. It is dropped, and the material keeps Godot's Lambert. Set the value directly and it works. |
+| The *indirect* half of Oren-Nayar | MaterialX also scales ambient diffuse by the directional albedo (`mx_oren_nayar_diffuse_bsdf.glsl:34`). Godot computes ambient in the fragment stage, outside the light function, so a material with a high `diffuse_roughness` keeps an ambient term that is not darkened to match its direct light. Affects only materials the setting actually reaches. |
+| A `diffuse_roughness` material that also has `coat`, `sheen`, `subsurface`, anisotropy or a linked roughness | Those lobes are not readable from a light function at all, so the material keeps Godot's whole lighting rather than half of it. Reported in the dock when it happens. |
 | `subsurface_color`, `subsurface_radius`, `subsurface_scale` | Godot's subsurface scattering takes a radius and depth per object, not a per-material colour and radius. |
 | `coat_color` | Godot's clearcoat has no tint port. |
 | `coat_IOR` | Godot hardcodes the coat IOR at 1.5. |

@@ -27,16 +27,30 @@ const AUTO_BAKE := PREFIX + "auto_bake_previews"
 const PREVIEW_SIZE := PREFIX + "preview_size"
 ## Evaluate MaterialX diffuse_roughness with an Oren-Nayar lobe.
 ##
-## Off by default, and still called "experimental" because the cost is real: a
-## material that uses this has Godot's whole lighting model reimplemented in the
-## light stage, so this addon -- not the engine -- is now responsible for the
-## result. Turn it off to fall back to Godot's own BRDF, which is the escape
-## hatch if Godot fixes a lighting bug and you would rather have that than this.
+## On by default, because the lobe is MaterialX's own answer and Godot has no
+## equivalent: leaving it off silently renders those materials with Lambert and
+## loses the roughness the file asked for.
 ##
-## At diffuse_roughness 0 MaterialX's Oren-Nayar term is exactly 1.0, which is
-## Lambert, so for a material that sets it the substitution is faithful rather
-## than approximate.
-const EXPERIMENTAL_CUSTOM_LIGHTING := PREFIX + "experimental_custom_lighting"
+## The cost is real. A material that uses this has Godot's whole lighting model
+## reimplemented in the light stage, so this addon -- not the engine -- is
+## responsible for the result. Turning it off falls back to Godot's own BRDF,
+## which is the escape hatch if Godot fixes a lighting bug and you would rather
+## have that than this.
+##
+## Two things the custom node cannot do, both engine limits rather than oversights:
+##
+## - At diffuse_roughness 0 MaterialX's Oren-Nayar term is exactly 1.0, which is
+##   Lambert, so for a material that sets it the substitution is faithful rather
+##   than approximate.
+## - MaterialX also scales *indirect* diffuse by the directional albedo
+##   (mx_oren_nayar_diffuse_bsdf.glsl:34). Godot computes ambient in the fragment
+##   stage, outside the light function, so a material with a high
+##   diffuse_roughness keeps an ambient term that is not darkened to match its
+##   direct light. Only affects the materials this setting actually reaches.
+const CUSTOM_LIGHTING := PREFIX + "custom_lighting"
+## The name this setting had while it was opt-in, kept so an existing project
+## does not silently switch behaviour when it upgrades.
+const LEGACY_CUSTOM_LIGHTING := PREFIX + "experimental_custom_lighting"
 
 ## Smallest useful thumbnail. Below this the bake costs the same and looks worse.
 const MIN_PREVIEW_SIZE := 32
@@ -65,13 +79,30 @@ static func install_defaults() -> bool:
 		"hint": PROPERTY_HINT_RANGE,
 		"hint_string": "%d,%d,8" % [MIN_PREVIEW_SIZE, MAX_PREVIEW_SIZE],
 	}) or wrote
-	# Experimental, so off unless asked for -- but it still has to be
-	# registered, or it is never created and never appears in the Project
-	# Settings window.
-	wrote = _set_if_missing(EXPERIMENTAL_CUSTOM_LIGHTING, false, {
+	# Migrated first, so the old key's value lands in the new key before
+	# _set_if_missing gives it the new default. Doing this afterwards would mean
+	# the new key always already exists, and a project that deliberately chose
+	# "off" would be switched on by the upgrade.
+	_drop_legacy()
+	# Registered even though it has a good default, or it never appears in the
+	# Project Settings window at all.
+	wrote = _set_if_missing(CUSTOM_LIGHTING, true, {
 		"type": TYPE_BOOL,
 	}) or wrote
 	return wrote
+
+
+## A project that set the old key keeps its value rather than picking up the new
+## default, so upgrading never silently changes how materials render. The key
+## itself is removed, since leaving it would show a dead entry in Project
+## Settings.
+static func _drop_legacy() -> void:
+	if not ProjectSettings.has_setting(LEGACY_CUSTOM_LIGHTING):
+		return
+	if not ProjectSettings.has_setting(CUSTOM_LIGHTING):
+		ProjectSettings.set_setting(CUSTOM_LIGHTING,
+			bool(ProjectSettings.get_setting(LEGACY_CUSTOM_LIGHTING, true)))
+	ProjectSettings.set_setting(LEGACY_CUSTOM_LIGHTING, null)
 
 
 static func _set_if_missing(key: String, value: Variant, info: Dictionary) -> bool:
@@ -107,5 +138,5 @@ static func preview_size() -> int:
 	return clampi(raw, MIN_PREVIEW_SIZE, MAX_PREVIEW_SIZE)
 
 
-static func experimental_custom_lighting() -> bool:
-	return bool(ProjectSettings.get_setting(EXPERIMENTAL_CUSTOM_LIGHTING, false))
+static func custom_lighting() -> bool:
+	return bool(ProjectSettings.get_setting(CUSTOM_LIGHTING, true))
