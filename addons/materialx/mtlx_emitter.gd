@@ -452,8 +452,8 @@ func _try_screen_refraction(surface: MtlxDocument.MtlxElement) -> bool:
 
 	# Godot refracts about N with the incident vector pointing into the surface,
 	# which is the negated view vector.
-	var normal: int = _add_input("Normal")
-	var view: int = _add_input("View")
+	var normal: int = _add_input("normal")
+	var view: int = _add_input("view")
 
 	var incident := VisualShaderNodeVectorOp.new()
 	incident.set("operator", GodotMap.VOP_MUL)
@@ -509,7 +509,7 @@ func _try_screen_refraction(surface: MtlxDocument.MtlxElement) -> bool:
 	_connect(Ref2.new(xy_id, 0), 0, scaled_id, 0)
 	_connect(Ref2.new(strength_id, 0), 0, scaled_id, 1)
 
-	var screen_uv := _add_input("ScreenUV")
+	var screen_uv := _add_input("screen_uv")
 	var offset := VisualShaderNodeVectorOp.new()
 	offset.set("operator", GodotMap.VOP_ADD)
 	offset.set("op_type", VisualShaderNodeVectorOp.OP_TYPE_VECTOR_2D)
@@ -547,6 +547,25 @@ const REFRACTION_STRENGTH := 0.02
 
 
 ## Adds a fragment-stage input node reading one of the shader's built-ins.
+##
+## The name is the built-in's *lowercase* key, not the GLSL spelling.
+## VisualShaderNodeInput::ports (visual_shader.cpp:3341-3351) holds both:
+##
+##     { MODE_SPATIAL, TYPE_FRAGMENT, VECTOR_2D, "screen_uv", "SCREEN_UV" }
+##                              ^ key          ^ what it emits
+##
+## so "screen_uv" resolves and "SCREEN_UV" does not. A name that misses the table is
+## not an error: the node keeps its default, the generated code shows
+## `float n_out = 0.0;` where a vec2 was meant, and the failure is completely
+## silent. With NORMAL and VIEW both zero, refract() returns a zero vector, the
+## screen offset is zero, and the screen texture is sampled at a constant corner
+## pixel -- the graph is wired correctly and the feature does nothing at all.
+##
+## mtlx_refraction_check could not see this, because it only reads the generated
+## code for the words "hint_screen_texture" and "refract(", both of which are
+## present. mtlx_refraction_render.gd catches it by holding everything else
+## constant and varying only the strength, and measuring whether the background
+## behind the sphere moves.
 func _add_input(input_name: String) -> int:
 	var node := VisualShaderNodeInput.new()
 	node.input_name = input_name

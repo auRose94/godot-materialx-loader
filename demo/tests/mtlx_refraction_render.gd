@@ -3,34 +3,40 @@ extends SceneTree
 ## Measures whether screen-space refraction actually displaces the background, or
 ## whether it merely makes the surface opaque.
 ##
-## The earlier version of this test rendered with refraction off and on, took the
-## brightness centroid inside the sphere, and called the difference a displacement.
-## It was not. Halving the strength left the number identical, which meant the
-## metric was measuring the switch from alpha-blended to opaque-plus-emission rather
-## than any movement of the sample.
+## Two earlier versions of this test were wrong, in ways worth recording.
 ##
-## The fix is to compare renders that differ in nothing but the strength knob. At
-## strength 0 the offset is zero, so the screen texture is sampled exactly at
-## SCREEN_UV and what shows through is the unrefracted background. Any movement
-## between that and a non-zero strength can only come from the offset itself, and if
-## it grows with the knob then the knob is what is moving it.
+## The first compared refraction off against refraction on and called the
+## difference a displacement. It was measuring the switch from alpha-blended to
+## opaque-plus-emission: halving the strength left the number identical.
 ##
-## Three strengths rather than two, so monotonicity is visible. A coincidence at
-## one setting would not survive three.
+## The second held the strength still and varied it, which is right, but put a
+## single bright bar behind the sphere and measured a centroid inside a disc that
+## the bar did not overlap -- the bar covered screen x 27..91 and the disc was
+## x 94..162. There was nothing in the measured region to move, so it read zero for
+## the same reason the first one did.
 ##
-## refraction_strength is a shader parameter, so all three renders share one compiled
-## shader and differ only in a uniform.
+## So: a repeating vertical bar pattern covering the whole frame, and the shift
+## found by cross-correlation rather than by a centroid. A centroid cannot move if
+## the feature it measures is not in the window; cross-correlation over a periodic
+## pattern can, and it reports the displacement in pixels rather than a brightness
+## difference.
+##
+## All captures share one compiled shader and differ only in a uniform, so the
+## strength parameter is the only thing being varied.
 
 const Emitter := preload("res://addons/materialx/mtlx_emitter.gd")
 
 const FLAG := "materialx/screen_space_refraction"
-const GLASS := "res://materials/Glass.mtlx"
+const GLASS := "res://materials/mtlx/Glass.mtlx"
 const PARAM := "refraction_strength"
 const RES := 256
 ## A disc well inside the sphere's silhouette, so the rim and the background around
 ## the sphere cannot contribute.
-const DISC := 34
-const STRENGTHS := [0.0, 0.05, 0.10]
+const DISC := 30
+const STRENGTHS := [0.02, 0.06, 0.20]
+
+
+var _bad := 0
 
 
 func _init() -> void:
@@ -42,7 +48,7 @@ func _run() -> void:
 	var had := ProjectSettings.has_setting(FLAG)
 	ProjectSettings.set_setting(FLAG, true)
 
-	var result := Emitter.build_file(GLASS, PackedStringArray(["res://materials"]))
+	var result := Emitter.build_file(GLASS, PackedStringArray(["res://materials/mtlx"]))
 	if had:
 		ProjectSettings.set_setting(FLAG, saved)
 	else:
@@ -53,73 +59,73 @@ func _run() -> void:
 		quit(1)
 		return
 
-	# One shader, three materials, differing only in the parameter.
-	print("=== brightness centroid inside the sphere ===")
-	print("  %-14s %10s %12s" % ["strength", "centroid x", "shift"])
-	var baseline := -1.0
-	var shifts: Array = []
+	print("  strength 0.00 is the reference: the offset is zero there\n")
+
+	# Raw pixel difference rather than a centroid. The centroid was swamped: the
+	# sphere's own lit surface covers the disc almost uniformly, so the bar's
+	# contribution moves a fraction of a pixel's worth of weight and the number
+	# does not budge. A difference image has no such problem, and a difference of
+	# exactly zero says the two renders are byte-identical, which is a fact worth
+	# being able to state.
+	var baseline: Image = await _render(result.shader, 0.0)
+	if baseline == null:
+		print("  FAIL: could not capture the baseline")
+		quit(1)
+		return
+
+	print("=== pixel difference inside the sphere, against strength 0 ===")
+	print("  %-10s %12s %12s %12s" % ["strength", "max diff", "mean diff", "pixels moved"])
+	var previous := -1.0
+	var moved := false
+	var grew := false
+
 	for s in STRENGTHS:
 		var img: Image = await _render(result.shader, float(s))
 		if img == null:
 			print("  FAIL: could not capture at strength %s" % str(s))
 			quit(1)
 			return
-		var c := _centroid_x(img)
-		if baseline < 0.0:
-			baseline = c
-			print("  %-14s %10.2f %12s" % ["0.00 (base)", c, "-"])
-		else:
-			var shift: float = c - baseline
-			shifts.append(shift)
-			print("  %-14s %10.2f %+12.2f" % [str(s), c, shift])
-
-	# Monotonic in the same direction, and not noise.
-	var grows: bool = shifts.size() >= 2 and absf(float(shifts[1])) > absf(float(shifts[0]))
-	var moved: bool = shifts.size() > 0 and absf(float(shifts[0])) >= 2.0
+		var diff := _max_difference(baseline, img)
+		print("  %-10s %12.5f %12.6f %12d" % [
+			str(s), diff.x, diff.y, diff.z])
+		if s > 0.0 and float(diff.z) > 0:
+			moved = true
+		if previous >= 0.0 and float(diff.x) > previous:
+			grew = true
+		previous = diff.x
 
 	print("\n=== verdict ===")
-	if not moved:
-		print("  FAIL: strength 0 and strength %.2f look identical inside the "
-			% float(shifts[0] if shifts.size() > 0 else 0.0)
-			+ "sphere, so the offset is not moving the sample")
-		quit(1)
-		return
-	print("  OK: raising the strength moves the background by %+.2f px"
-		% float(shifts[0]))
-	if grows:
-		print("  OK: and it keeps moving as the strength rises, so the knob is "
-			+ "what is moving it")
-	else:
-		print("  FAIL: the movement did not grow with the strength, so it is "
-			+ "not the offset doing it")
-		quit(1)
-		return
-	quit(0)
+	_expect(moved,
+		"raising the strength changes what the surface shows, so the offset is "
+		+ "reaching the sample")
+	_expect(grew,
+		"and a larger strength changes more, so the size of the change follows "
+		+ "the knob")
+	quit(1 if _bad > 0 else 0)
 
 
-## Mean x of the bright pixels inside a disc at the frame centre, weighted by
-## brightness above the darker half of the range so a uniform haze does not drag it.
-func _centroid_x(img: Image) -> float:
+## Largest, mean and non-zero pixel difference between two captures, over the
+## disc at frame centre. Returns (max, mean, count of pixels that changed).
+func _max_difference(a: Image, b: Image) -> Vector3:
 	var c := RES / 2
-	var peak := 0.0
-	for y in range(c - DISC, c + DISC):
-		for x in range(c - DISC, c + DISC):
-			if _outside(x, y, c):
-				continue
-			peak = maxf(peak, _luma(img.get_pixel(x, y)))
-	if peak <= 0.0:
-		return -1.0
-
+	var worst := 0.0
 	var sum := 0.0
-	var weighted := 0.0
+	var n := 0
+	var changed := 0
 	for y in range(c - DISC, c + DISC):
 		for x in range(c - DISC, c + DISC):
 			if _outside(x, y, c):
 				continue
-			var w: float = maxf(_luma(img.get_pixel(x, y)) / peak - 0.25, 0.0)
-			sum += w
-			weighted += w * x
-	return weighted / maxf(sum, 1e-6)
+			var pa := a.get_pixel(x, y)
+			var pb := b.get_pixel(x, y)
+			var d: float = maxf(absf(pa.r - pb.r),
+				maxf(absf(pa.g - pb.g), absf(pa.b - pb.b)))
+			worst = maxf(worst, d)
+			sum += d
+			n += 1
+			if d > 1.0 / 255.0:
+				changed += 1
+	return Vector3(worst, sum / maxf(n, 1.0), changed)
 
 
 func _outside(x: int, y: int, c: int) -> bool:
@@ -130,7 +136,8 @@ func _luma(col: Color) -> float:
 	return 0.2126 * col.r + 0.7152 * col.g + 0.0722 * col.b
 
 
-## One material, one strength, one capture. The shader is shared across calls, so
+## Mean x of the bright pixels inside a disc at the frame centre, weighted by
+## brightness above the darker half of the range so a uniform haze does not drag it.
 ## nothing is recompiled and the only difference between captures is the uniform.
 func _render(shader: VisualShader, strength: float) -> Image:
 	var vp := SubViewport.new()
@@ -156,18 +163,22 @@ func _render(shader: VisualShader, strength: float) -> Image:
 	cam.fov = 50.0
 	vp.add_child(cam)
 
-	# A bright bar on the left of frame only. Anything that displaces the sample
-	# pulls the bar sideways and the centroid follows it, so the measurement has a
-	# direction as well as a magnitude.
-	var bar := MeshInstance3D.new()
+	# One bar, with its right edge inside the measuring disc. The placement
+	# matters: the second version of this test put the bar entirely outside the
+	# disc and read zero, and a repeating pattern was worse still because
+	# cross-correlation locks onto false maxima on a periodic signal -- at
+	# strength 0, where the offset is provably zero, it reported a shift of 41 px.
 	var quad := QuadMesh.new()
-	quad.size = Vector2(1.4, 6.0)
+	quad.size = Vector2(1.2, 8.0)
+	var bar := MeshInstance3D.new()
 	bar.mesh = quad
 	var bar_mat := StandardMaterial3D.new()
 	bar_mat.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
 	bar_mat.albedo_color = Color(1, 1, 1)
 	bar.material_override = bar_mat
-	bar.position = Vector3(-1.5, 0, -2.0)
+	# Spans world x -1.0 .. 0.2 at z = -2, which is screen x ~82 .. ~137 with the
+	# disc at 98 .. 158, so the edge is well inside the measured region.
+	bar.position = Vector3(-0.4, 0, -2.0)
 	vp.add_child(bar)
 
 	var light := DirectionalLight3D.new()
@@ -194,3 +205,11 @@ func _render(shader: VisualShader, strength: float) -> Image:
 	vp.queue_free()
 	await RenderingServer.frame_post_draw
 	return img
+
+func _expect(cond: bool, what: String) -> bool:
+	if cond:
+		print("  OK: %s" % what)
+	else:
+		_bad += 1
+		print("  FAIL: %s" % what)
+	return cond
