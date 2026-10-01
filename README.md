@@ -63,6 +63,8 @@ replaced in the light stage, so for those the addon, not the engine, is
 responsible for the result. If you would rather have Godot's own BRDF, that
 setting is the escape hatch.
 
+| `materialx/screen_space_refraction` | `false` | Render `transmission` as real refraction of the scene behind the surface, instead of fading it out with `ALPHA`. Off by default until it has been looked at. |
+
 This was `materialx/experimental_custom_lighting` and defaulted to off before
 1.1.0. An existing value is migrated on first load, so upgrading never silently
 changes how your materials render.
@@ -157,14 +159,14 @@ reported in the dock rather than silently approximated.
 
 | Input | Why it is dropped |
 |---|---|
+| `transmission`, `transmission_color`, `transmission_depth`, `transmission_scatter`, `transmission_dispersion` | With `materialx/screen_space_refraction` on, `transmission` displaces the background along the refracted vector. Two approximations remain: only the `xy` of the view-space refracted direction is used, so it drifts at grazing angles, and the sample is not depth-masked, so a silhouette can pull in background from behind the object. With it off, `transmission` becomes `ALPHA` (`max(1 - transmission, 0.15)`), which shows the background without displacing it. |
 | `diffuse_roughness`, when computed rather than written as a literal | Oren-Nayar can only be evaluated in the light stage, and a value computed in a nodegraph has to be a constant there. It is dropped, and the material keeps Godot's Lambert. Set the value directly and it works. |
 | The *indirect* half of Oren-Nayar | MaterialX also scales ambient diffuse by the directional albedo (`mx_oren_nayar_diffuse_bsdf.glsl:34`). Godot computes ambient in the fragment stage, outside the light function, so a material with a high `diffuse_roughness` keeps an ambient term that is not darkened to match its direct light. Affects only materials the setting actually reaches. |
 | A `diffuse_roughness` material that also has `coat`, `sheen`, `subsurface`, anisotropy or a linked roughness | Those lobes are not readable from a light function at all, so the material keeps Godot's whole lighting rather than half of it. Reported in the dock when it happens. |
-| `subsurface_color`, `subsurface_radius`, `subsurface_scale` | Godot's subsurface scattering takes a radius and depth per object, not a per-material colour and radius. |
+| `subsurface_color`, `subsurface_radius`, `subsurface_scale`, `subsurface_anisotropy` | Godot's scattering is driven by a single strength. `SSS_TRANSMITTANCE_COLOR`, `_DEPTH` and `_BOOST` are registered as fragment built-ins but are not writable output ports, so a material cannot say what colour its scatter is or how far it travels. The `subsurface` weight itself does work and reaches `SSS_STRENGTH`. |
 | `coat_color` | Godot's clearcoat has no tint port. |
 | `coat_IOR` | Godot hardcodes the coat IOR at 1.5. |
 | `sheen_roughness` | Godot's rim has no roughness term; its exponent comes from the surface roughness instead. |
-| `transmission`, `transmission_depth`, `transmission_scatter`, `transmission_color`, `transmission_dispersion` | No refraction lobe in Godot's spatial BRDF. Folded into `ALPHA` (`max(1 - transmission, 0.15)`), which is an approximation. |
 
 Deliberately approximated rather than dropped, because a partial match beats
 nothing:

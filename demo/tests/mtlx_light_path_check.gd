@@ -14,7 +14,11 @@ const FLAG := "materialx/custom_lighting"
 const SIZE := Vector2i(256, 256)
 const RES := 256
 
-const SUBJECTS := [
+## The six named materials are joined by whatever corpus materials the custom
+## lighting path actually reaches, so relaxing the gate to admit subsurface
+## materials is covered here rather than assumed. A material that darkens when the
+## custom path takes over is the failure this is looking for.
+const NAMED := [
 	"res://materials/Gold.mtlx",
 	"res://materials/Gold_Foil.mtlx",
 	"res://materials/Perforated_Metal.mtlx",
@@ -32,9 +36,13 @@ func _run() -> void:
 	var saved: Variant = ProjectSettings.get_setting(FLAG, true)
 	var saved_present := ProjectSettings.has_setting(FLAG)
 
+	var subjects: PackedStringArray = PackedStringArray(NAMED)
+	subjects.append_array(_custom_lighting_corpus())
+
+	print("checking %d material(s)\n" % subjects.size())
 	print("%-34s %10s %10s %9s" % ["material", "custom", "builtin", "delta"])
 	var dark := 0
-	for path in SUBJECTS:
+	for path in subjects:
 		ProjectSettings.set_setting(FLAG, true)
 		var on := await _centre_luminance(path)
 		ProjectSettings.set_setting(FLAG, false)
@@ -53,7 +61,7 @@ func _run() -> void:
 	else:
 		ProjectSettings.set_setting(FLAG, null)
 
-	print("\nmaterials darkened by the custom path: %d / %d" % [dark, SUBJECTS.size()])
+	print("\nmaterials darkened by the custom path: %d / %d" % [dark, subjects.size()])
 	quit(1 if dark > 0 else 0)
 
 
@@ -116,3 +124,27 @@ func _centre_luminance(path: String) -> float:
 			sum += 0.2126 * c.r + 0.7152 * c.g + 0.0722 * c.b
 			n += 1
 	return sum / maxf(n, 1.0)
+
+
+## Every corpus material that the custom lighting path takes over. Found by
+## building with the setting on and looking for the light node, so the list cannot
+## drift from what the gate actually admits.
+func _custom_lighting_corpus() -> PackedStringArray:
+	ProjectSettings.set_setting("materialx/custom_lighting", true)
+	var out := PackedStringArray()
+	var d := DirAccess.open("res://materials")
+	if d == null:
+		return out
+	for f in d.get_files():
+		if not f.ends_with(".mtlx"):
+			continue
+		var path := "res://materials/" + f
+		var result := Emitter.build_file(path, PackedStringArray(["res://materials"]))
+		if not result.ok:
+			continue
+		for id in result.shader.get_node_list(2):
+			if result.shader.get_node(2, id) is VisualShaderNodeCustom:
+				out.append(path)
+				break
+	return out
+

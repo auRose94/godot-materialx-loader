@@ -135,6 +135,7 @@ func _emit_surface(surface: MtlxDocument.MtlxElement) -> void:
 	var refracted: bool = _try_screen_refraction(surface)
 	_fold_opacity(surface, not refracted)
 	_fold_sheen_color(surface)
+	_fold_subsurface(surface)
 	_try_custom_lighting(surface)
 
 	# Inputs handled by the folds above rather than by the direct port loop.
@@ -143,6 +144,7 @@ func _emit_surface(surface: MtlxDocument.MtlxElement) -> void:
 		"specular", "specular_IOR", "specular_color",
 		"specular_rotation", "opacity", "transmission", "sheen_color",
 		"transmission_color", "transmission_depth", "ior",
+		"subsurface",
 	]
 	for key in GodotMap.SURFACE_PORTS.keys():
 		var name: String = key
@@ -346,6 +348,64 @@ func _fold_anisotropy_flow(surface: MtlxDocument.MtlxElement) -> void:
 	var node: VisualShaderNodeVec3Constant = _node(id)
 	node.constant = Vector3(cos(rot), sin(rot), 0.0)
 	_connect_output(Ref2.new(id, 0), GodotMap.OUT_ANISOTROPY_FLOW)
+
+
+## MaterialX `subsurface` -> Godot `SSS_STRENGTH`.
+##
+## Godot's subsurface scattering is a compute pass that blurs the diffuse buffer,
+## and the fragment shader's SSS_STRENGTH is the entire interface to it: the
+## value lands in diffuse_buffer.a (scene_forward_clustered.glsl:3074) and becomes
+## the blur strength. There is nothing else to fill in.
+##
+## Two things need care here, and both were found by the test rather than by
+## reading:
+##
+## * Godot's port is a straight multiplier into the blur strength, so a
+##   MaterialX weight above 1 over-drives the pass. The weight is documented as
+##   0..1 but a file can author anything, and this library writes scalars bare.
+## * Writing the port at all enables the subsurface pass, so a file that writes
+##   `subsurface = 0` pays for a pass that contributes nothing. Zero is the
+##   MaterialX default, so that input is left alone entirely.
+##
+## `subsurface_color`, `subsurface_radius` and `subsurface_scale` stay dropped:
+## SSS_TRANSMITTANCE_COLOR and SSS_TRANSMITTANCE_DEPTH are registered as fragment
+## built-ins in shader_types.cpp but are not writable output ports. The node has
+## 25 ports and 19-24 are ALPHA_SCISSOR_THRESHOLD, ALPHA_HASH_SCALE,
+## ALPHA_ANTIALIASING_EDGE, ALPHA_TEXTURE_COORDINATE, DEPTH and BENT_NORMAL_MAP.
+## Verified by writing to each port and reading the name off the generated code;
+## see mtlx_port_order.gd.
+func _fold_subsurface(surface: MtlxDocument.MtlxElement) -> void:
+	var inp: MtlxDocument.MtlxInput = surface.input("subsurface")
+	if inp == null:
+		return
+
+	if not inp.is_link():
+		var raw: Variant = inp.typed_value()
+		if raw == null:
+			return
+		var value: float = float(raw)
+		if value <= 0.0:
+			# Zero is the default, and writing it would switch the pass on for
+			# nothing.
+			return
+		var clamped := VisualShaderNodeFloatParameter.new()
+		clamped.parameter_name = _safe_param_name("subsurface")
+		clamped.default_value_enabled = true
+		clamped.default_value = clampf(value, 0.0, SSS_STRENGTH_MAX)
+		_connect_output(Ref2.new(_add(clamped), 0), GodotMap.OUT_SSS_STRENGTH)
+		return
+
+	# Driven by the graph, so the clamp is a real node rather than a constant.
+	var src: Ref2 = _emit_input(inp, surface.graph)
+	if not src.is_valid():
+		return
+	var limited := _fop(GodotMap.FOP_MIN, src, SSS_STRENGTH_MAX)
+	var floored := _fop(GodotMap.FOP_MAX, limited, 0.0)
+	_connect_output(floored, GodotMap.OUT_SSS_STRENGTH)
+
+
+## Godot's SSS_STRENGTH is not clamped by the engine, so the clamp is ours.
+const SSS_STRENGTH_MAX := 1.0
 
 
 ## Screen-space refraction: show what is actually behind a transmissive surface.
@@ -591,15 +651,28 @@ func _try_custom_lighting(surface: MtlxDocument.MtlxElement) -> bool:
 
 	# Anything whose lobes this node cannot reproduce. Clearcoat, rim and
 	# anisotropy are not readable from a light function at all -- the built-in
-	# list in shader_types.cpp does not contain them -- and subsurface needs
-	# per-object transmittance uniforms. Taking such a material would silently
-	# drop those lobes.
+	# list in shader_types.cpp does not contain them. Taking such a material
+	# would silently drop those lobes.
 	#
 	# Tested on the enabling input, not on the parameters. coat_roughness is
 	# 0.1 in 253 of the 277 files here against a MaterialX default of 0.03, so
 	# testing parameters refused every material in the library -- while coat
 	# itself is 0 in 253 of them, meaning that lobe is off and the roughness is
 	# inert.
+	# Subsurface stays refused, but for a narrower reason than it used to.
+	#
+	# Its transmittance genuinely is unreachable from a light function. What changed
+	# is that this is no longer the whole reason it has to be refused: Godot's
+	# scattering is a compute pass over the diffuse buffer, and SSS_STRENGTH is
+	# written outside the LIGHT_CODE_USED guard
+	# (scene_forward_clustered.glsl:3074), so a material with subsurface does keep
+	# its scattering under the custom path.
+	#
+	# It is refused because admitting it was measured to cost a material accuracy:
+	# relaxing the gate took the custom path from 11 materials to 22, and
+	# Cream_Onyx then rendered 0.10 dimmer than on Godot's own lighting, out of 28
+	# checked. That is a real regression whose cause is not yet understood, so the
+	# gate stays shut until it is.
 	for enabling in ["coat", "sheen", "subsurface"]:
 		if _enabled(surface, enabling):
 			return false
