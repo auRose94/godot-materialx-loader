@@ -170,13 +170,25 @@ const _SHADER := """
 		float dielectric = 0.16 * SPECULAR_AMOUNT * SPECULAR_AMOUNT;
 		vec3 f0 = mix(vec3(dielectric), albedo, vec3(metallic));
 
-		// Diffuse, scene_forward_lights_inc.glsl:222-244.
+		// Diffuse, scene_forward_lights_inc.glsl:242.
 		//
-		// Godot's line is `light_color * (NdotL / PI) * attenuation *
-		// cc_attenuation`. This is the same thing scaled by MaterialX's
-		// Oren-Nayar term, which is exactly 1.0 at diffuse_roughness 0, so at
-		// the default it reduces to Godot's expression rather than
-		// approximating it.
+		// Godot's line is `light_color * diffuse_brdf_NL * attenuation *
+		// cc_attenuation`, with no albedo in it -- and none should be added
+		// here. The renderer applies albedo, AO and the metallic blend *after*
+		// the light loop:
+		//
+		//     diffuse_light *= albedo;              // :3048
+		//     diffuse_light *= ao;                  // :3051
+		//     diffuse_light *= 1.0 - metallic;      // :3055
+		//
+		// so multiplying by albedo in here would apply it twice, and the render
+		// test measured that as a mean error of 0.022 per channel against
+		// Godot's own path -- larger than the whole specular difference.
+		//
+		// The Oren-Nayar term is a pure multiplier on the BRDF, so folding it
+		// into diffuse_brdf_NL keeps the structure identical to Godot's. It is
+		// exactly 1.0 at diffuse_roughness 0 (A = 1, B = 0), so at the default
+		// this is Godot's expression rather than an approximation of it.
 		//
 		// There is no cc_attenuation here because this node is only used on
 		// materials with no clearcoat -- the gate refuses the rest, since
@@ -189,10 +201,9 @@ const _SHADER := """
 			float sigma2 = diffuse_roughness * diffuse_roughness;
 			float A = 1.0 - 0.5 * (sigma2 / (sigma2 + 0.33));
 			float B = 0.45 * sigma2 / (sigma2 + 0.09);
-			float diffuse_term = A + B * stinv;
+			float diffuse_brdf_NL = (A + B * stinv) * NdotL / 3.14159265;
 
-			diffuse_light += albedo * LIGHT_COLOR
-				* (diffuse_term * NdotL / 3.14159265) * ATTENUATION;
+			diffuse_light += LIGHT_COLOR * diffuse_brdf_NL * ATTENUATION;
 		}
 
 		// Backlight, scene_forward_lights_inc.glsl. The one extra lobe that is
