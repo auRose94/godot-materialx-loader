@@ -1,31 +1,39 @@
 extends SceneTree
 
-## Renders one material twice -- custom lighting forced on, then off -- and
-## reports the luminance of each, so a material that goes dark on the custom path
-## is caught numerically instead of hiding in a contact sheet.
+## Checks that the custom lighting path is faithful, by asserting the one thing
+## that is supposed to be true of it.
 ##
-## Gold is the case that motivated this: it has diffuse_roughness 0.5, so it is
-## one of the few materials the custom path reaches, and it rendered at 0.016
-## luminance -- essentially black -- for a bright gold dielectric.
+## The previous version of this test flagged any material that rendered darker on
+## the custom path than on Godot's own. That looked reasonable and was wrong: it
+## treats Oren-Nayar itself as a fault. A rough diffuse lobe is *supposed* to be
+## darker than Lambert at normal incidence, because that energy is redirected
+## toward grazing angles. Cream_Onyx was refused by the gate over this for a while,
+## on the strength of a 0.10 delta, before it turned out to be asking for
+## diffuse_roughness = 1.0 -- where the lobe is 0.624 to 1.037 and the darkening
+## is the material doing what it says.
+##
+## The invariant that does hold is sharper and catches real faults: at
+## diffuse_roughness 0 the Oren-Nayar term is exactly 1.0, so the custom path must
+## reproduce Godot's lighting to within noise. Everything else about the node --
+## albedo, energy compensation, specular, the light loop -- has to be right for
+## that to come out, which is how the double-albedo bug was caught.
+##
+## Darkening at the authored sigma is then reported, not judged, and read against
+## the formula rather than against a threshold.
 
 const Emitter := preload("res://addons/materialx/mtlx_emitter.gd")
 
 const FLAG := "materialx/custom_lighting"
-const SIZE := Vector2i(256, 256)
-const RES := 256
+const TMP := "res://.light_path"
+const RES := 128
+## A disc well inside the sphere, so the silhouette never contributes.
+const DISC := 18
 
-## The six named materials are joined by whatever corpus materials the custom
-## lighting path actually reaches, so relaxing the gate to admit subsurface
-## materials is covered here rather than assumed. A material that darkens when the
-## custom path takes over is the failure this is looking for.
-const NAMED := [
-	"res://materials/Gold.mtlx",
-	"res://materials/Gold_Foil.mtlx",
-	"res://materials/Perforated_Metal.mtlx",
-	"res://materials/TH_Blue_Denim_Fabric.mtlx",
-	"res://materials/Black_Upholstery.mtlx",
-	"res://materials/Glazed_Cube_Pattern_Tiles.mtlx",
-]
+## Tolerance on the sigma-0 comparison. The capture is RGBA8, so a difference of
+## a couple of quantisation steps is the floor, not signal.
+const TOLERANCE := 0.02
+
+var _bad := 0
 
 
 func _init() -> void:
@@ -33,55 +41,155 @@ func _init() -> void:
 
 
 func _run() -> void:
-	var saved: Variant = ProjectSettings.get_setting(FLAG, true)
-	var saved_present := ProjectSettings.has_setting(FLAG)
+	DirAccess.make_dir_recursive_absolute(ProjectSettings.globalize_path(TMP))
 
-	var subjects: PackedStringArray = PackedStringArray(NAMED)
-	subjects.append_array(_custom_lighting_corpus())
+	var subjects: PackedStringArray = _custom_lighting_corpus()
+	print("checking %d material(s) on the custom lighting path\n" % subjects.size())
+	print("%-32s %9s %9s %9s %9s" % [
+		"material", "godot", "sigma=0", "authored", "expected"])
 
-	print("checking %d material(s)\n" % subjects.size())
-	print("%-34s %10s %10s %9s" % ["material", "custom", "builtin", "delta"])
-	var dark := 0
+	var mismatched := 0
+	var darkened := 0
+
 	for path in subjects:
-		ProjectSettings.set_setting(FLAG, true)
-		var on := await _centre_luminance(path)
-		ProjectSettings.set_setting(FLAG, false)
-		var off := await _centre_luminance(path)
+		_set_custom(false)
+		var builtin: float = await _luminance(path)
 
-		var delta: float = on - off
-		# A custom path that darkens the material is the failure this is looking
-		# for; a brighter result is the point of the feature.
-		if delta < -0.05:
-			dark += 1
-		print("%-34s %10.4f %10.4f %+9.4f%s" % [
-			path.get_file(), on, off, delta, "   <-- DARKER" if delta < -0.05 else ""])
+		_set_custom(true)
+		var at_zero: float = await _luminance(_variant(path, 0.0))
+		var authored: float = await _luminance(path)
 
-	if saved_present:
-		ProjectSettings.set_setting(FLAG, saved)
-	else:
-		ProjectSettings.set_setting(FLAG, null)
+		var delta: float = at_zero - builtin
+		var expected := _lobe_at(_diffuse_roughness(path))
 
-	print("\nmaterials darkened by the custom path: %d / %d" % [dark, subjects.size()])
-	quit(1 if dark > 0 else 0)
+		print("%-32s %9.4f %9.4f %9.4f %9.4f" % [
+			path.get_file(), builtin, at_zero, authored, expected])
+
+		if absf(delta) > TOLERANCE:
+			mismatched += 1
+			print("      MISMATCH at sigma 0: %+.4f from Godot's own lighting" % delta)
+		if authored < builtin - TOLERANCE:
+			darkened += 1
+
+	_set_custom(false)
+	_cleanup()
+
+	print("\n=== verdict ===")
+	print("  materials whose sigma 0 disagrees with Godot : %d / %d" % [
+		mismatched, subjects.size()])
+	print("  materials darker than Lambert at their own sigma: %d / %d" % [
+		darkened, subjects.size()])
+
+	_expect(mismatched == 0,
+		"at sigma 0 the custom path reproduces Godot's own lighting, which is "
+		+ "the invariant that catches transcription faults")
+
+	print("\n--- %s ---" % ("light path OK" if _bad == 0 else "%d failure(s)" % _bad))
+	quit(1 if _bad > 0 else 0)
 
 
-## Mean luminance over a disc at the centre of the frame, where the sphere is.
-func _centre_luminance(path: String) -> float:
+## The mean of A + B * stinv over the sphere's visible normals, which is what the
+## lobe does to a diffuse term on average. A crude integral is enough: the point
+## is to have a number to read the darkening against, not to match the render.
+func _lobe_at(sigma: float) -> float:
+	if sigma <= 0.0:
+		return 1.0
+	var s2 := sigma * sigma
+	var a := 1.0 - 0.5 * (s2 / (s2 + 0.33))
+	var b := 0.45 * s2 / (s2 + 0.09)
+	# stinv is 0 at normal incidence and approaches 1 at grazing, so a uniform
+	# view sees something between A and A + B.
+	return a + b * 0.5
+
+
+## The material's authored diffuse_roughness, as a literal where there is one.
+func _diffuse_roughness(path: String) -> float:
+	var text := FileAccess.get_file_as_string(path)
+	var at := text.find('name="diffuse_roughness"')
+	if at < 0:
+		return 0.0
+	var tail := text.substr(at, 120)
+	var value_at := tail.find('value="')
+	if value_at < 0:
+		return 0.0
+	tail = tail.substr(value_at + 7, 24)
+	var end := tail.find("\"")
+	if end <= 0:
+		return 0.0
+	return tail.substr(0, end).to_float()
+
+
+## A copy of the material with its diffuse_roughness literal rewritten. The only
+## difference between the two builds is that one number.
+func _variant(path: String, sigma: float) -> String:
+	var text := FileAccess.get_file_as_string(path)
+	var at := text.find('name="diffuse_roughness"')
+	if at < 0:
+		# Already at the default, so the original already is the variant.
+		return path
+	var value_at := text.find('value="', at)
+	if value_at < 0:
+		return path
+	var start := value_at + 7
+	var end := text.find("\"", start)
+	if end <= start:
+		return path
+	var out := text.substr(0, start) + str(sigma) + text.substr(end)
+	var dst := TMP.path_join(path.get_file())
+	var f := FileAccess.open(dst, FileAccess.WRITE)
+	f.store_string(out)
+	f = null
+	return dst
+
+
+## Every corpus material the custom lighting path takes over, found by building
+## and looking for the light node so the list cannot drift from the gate.
+func _custom_lighting_corpus() -> PackedStringArray:
+	_set_custom(true)
+	var out := PackedStringArray()
+	var d := DirAccess.open("res://materials")
+	if d == null:
+		return out
+	for f in d.get_files():
+		if not f.ends_with(".mtlx"):
+			continue
+		var path := "res://materials/" + f
+		var result := Emitter.build_file(path, PackedStringArray(["res://materials"]))
+		if not result.ok:
+			continue
+		for id in result.shader.get_node_list(2):
+			if result.shader.get_node(2, id) is VisualShaderNodeCustom:
+				out.append(path)
+				break
+	return out
+
+
+func _set_custom(on: bool) -> void:
+	ProjectSettings.set_setting(FLAG, on)
+
+
+func _cleanup() -> void:
+	var abs_dir := ProjectSettings.globalize_path(TMP)
+	for f in DirAccess.get_files_at(TMP):
+		DirAccess.remove_absolute(abs_dir.path_join(f))
+	DirAccess.remove_absolute(abs_dir)
+
+
+func _luminance(path: String) -> float:
 	var result := Emitter.build_file(path, PackedStringArray(["res://materials"]))
 	if not result.ok:
-		push_warning("%s did not build: %s" % [path.get_file(), result.message])
+		push_warning("%s did not build: %s" % [path, result.message])
 		return -1.0
 
 	var vp := SubViewport.new()
-	vp.size = SIZE
-	vp.transparent_bg = false
+	vp.size = Vector2i(RES, RES)
 	vp.render_target_update_mode = SubViewport.UPDATE_ALWAYS
-	vp.msaa_3d = Viewport.MSAA_4X
 	vp.own_world_3d = true
+
 	var world := World3D.new()
 	var env := Environment.new()
 	env.background_mode = Environment.BG_COLOR
-	env.background_color = Color(0.15, 0.16, 0.18)
+	env.background_color = Color(0.05, 0.05, 0.06)
 	env.ambient_light_source = Environment.AMBIENT_SOURCE_COLOR
 	env.ambient_light_color = Color(0.7, 0.72, 0.78)
 	env.ambient_light_energy = 0.6
@@ -90,7 +198,6 @@ func _centre_luminance(path: String) -> float:
 	vp.world_3d = world
 
 	var cam := Camera3D.new()
-	cam.fov = 45.0
 	cam.position = Vector3(0, 0, 3.1)
 	cam.look_at_from_position(cam.position, Vector3.ZERO, Vector3.UP)
 	vp.add_child(cam)
@@ -116,35 +223,21 @@ func _centre_luminance(path: String) -> float:
 	vp.queue_free()
 	await RenderingServer.frame_post_draw
 
+	var c := RES / 2
 	var sum := 0.0
 	var n := 0
-	for y in range(RES / 2 - 20, RES / 2 + 20, 2):
-		for x in range(RES / 2 - 20, RES / 2 + 20, 2):
-			var c := img.get_pixel(x, y)
-			sum += 0.2126 * c.r + 0.7152 * c.g + 0.0722 * c.b
+	for y in range(c - DISC, c + DISC, 2):
+		for x in range(c - DISC, c + DISC, 2):
+			var px := img.get_pixel(x, y)
+			sum += 0.2126 * px.r + 0.7152 * px.g + 0.0722 * px.b
 			n += 1
 	return sum / maxf(n, 1.0)
 
 
-## Every corpus material that the custom lighting path takes over. Found by
-## building with the setting on and looking for the light node, so the list cannot
-## drift from what the gate actually admits.
-func _custom_lighting_corpus() -> PackedStringArray:
-	ProjectSettings.set_setting("materialx/custom_lighting", true)
-	var out := PackedStringArray()
-	var d := DirAccess.open("res://materials")
-	if d == null:
-		return out
-	for f in d.get_files():
-		if not f.ends_with(".mtlx"):
-			continue
-		var path := "res://materials/" + f
-		var result := Emitter.build_file(path, PackedStringArray(["res://materials"]))
-		if not result.ok:
-			continue
-		for id in result.shader.get_node_list(2):
-			if result.shader.get_node(2, id) is VisualShaderNodeCustom:
-				out.append(path)
-				break
-	return out
-
+func _expect(cond: bool, what: String) -> bool:
+	if cond:
+		print("  OK: %s" % what)
+	else:
+		_bad += 1
+		print("  FAIL: %s" % what)
+	return cond

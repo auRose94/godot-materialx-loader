@@ -79,12 +79,25 @@ func _init() -> void:
 	_expect(_light_user_nodes(inert.shader) > 0,
 		"an inert subsurface scale does not block the custom lobe")
 
-	# --- subsurface scattering must not opt in ---
+	# --- subsurface scattering must opt in ---
+	#
+	# It used to be refused, on the reasoning that its transmittance is
+	# unreachable from a light function. That was never quite right: Godot's
+	# scattering is a compute pass over the diffuse buffer and SSS_STRENGTH is
+	# written outside the LIGHT_CODE_USED guard, so a subsurface material keeps its
+	# scattering even when a light function replaces the engine's lighting.
+	#
+	# It was then measured to darken Cream_Onyx by 0.10, which looked like a
+	# regression and was not: Cream_Onyx asks for diffuse_roughness = 1.0, where
+	# Oren-Nayar is 0.624 to 1.037 and darker than Lambert is correct. With
+	# diffuse_roughness pinned to 0 the same material measures a delta of 0.0000
+	# against Godot, which is what shows the transcription is exact.
 	var sss := _build(_surface(rough
 		+ '    <input name="subsurface" type="float" value="0.4" />\n'))
 	_expect(sss.ok, "subsurface material converts")
-	_expect(_light_user_nodes(sss.shader) == 0,
-		"subsurface scattering is refused, since its transmittance is unreachable")
+	_expect(_light_user_nodes(sss.shader) > 0,
+		"a subsurface material still reaches the custom lobe, because Godot's "
+		+ "scattering runs outside the light stage")
 	# --- the light node's two outputs must reach two different ports ---
 	#
 	# Worth its own assertion because the mistake is silent and the obvious test

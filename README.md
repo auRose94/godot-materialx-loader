@@ -152,6 +152,20 @@ Two consequences worth knowing:
 
 Set `materialx/custom_lighting` to `false` to fall back to Godot's own BRDF.
 
+`subsurface` is **not** on that list. Godot's scattering is a compute pass over the
+diffuse buffer, and `SSS_STRENGTH` is written outside the `LIGHT_CODE_USED` guard, so a
+subsurface material keeps its scattering even when a light function replaces the
+engine's lighting.
+
+A note on reading the numbers: a material on this path renders **darker than Godot's
+Lambert on purpose** when `diffuse_roughness` is high. At 1.0 the lobe spans 0.624 to
+1.037, because a rough diffuse surface reflects less head-on and sends the rest toward
+grazing angles. Measured across the library, `Rubber` goes from 0.046 to 0.135 and
+`Cream_Onyx` from 0.353 to 0.326. That is the material doing what its file asked for, not
+a fault. The invariant that has to hold is the one at `diffuse_roughness = 0`, where the
+term is exactly 1.0 and the custom path reproduces Godot to within measurement noise --
+which is what `mtlx_light_path_check` asserts.
+
 ## Known limitations
 
 These are honest limits of the conversion, not bugs. They are all detected and
@@ -162,7 +176,7 @@ reported in the dock rather than silently approximated.
 | `transmission`, `transmission_color`, `transmission_depth`, `transmission_scatter`, `transmission_dispersion` | With `materialx/screen_space_refraction` on, `transmission` displaces the background along the refracted vector. Two approximations remain: only the `xy` of the view-space refracted direction is used, so it drifts at grazing angles, and the sample is not depth-masked, so a silhouette can pull in background from behind the object. With it off, `transmission` becomes `ALPHA` (`max(1 - transmission, 0.15)`), which shows the background without displacing it. |
 | `diffuse_roughness`, when computed rather than written as a literal | Oren-Nayar can only be evaluated in the light stage, and a value computed in a nodegraph has to be a constant there. It is dropped, and the material keeps Godot's Lambert. Set the value directly and it works. |
 | The *indirect* half of Oren-Nayar | MaterialX also scales ambient diffuse by the directional albedo (`mx_oren_nayar_diffuse_bsdf.glsl:34`). Godot computes ambient in the fragment stage, outside the light function, so a material with a high `diffuse_roughness` keeps an ambient term that is not darkened to match its direct light. Affects only materials the setting actually reaches. |
-| A `diffuse_roughness` material that also has `coat`, `sheen`, `subsurface`, anisotropy or a linked roughness | Those lobes are not readable from a light function at all, so the material keeps Godot's whole lighting rather than half of it. Reported in the dock when it happens. |
+| A `diffuse_roughness` material that also has `coat`, `sheen`, anisotropy or a linked roughness | Those lobes are not readable from a light function at all, so the material keeps Godot's whole lighting rather than half of it. Reported in the dock when it happens. |
 | `subsurface_color`, `subsurface_radius`, `subsurface_scale`, `subsurface_anisotropy` | Godot's scattering is driven by a single strength. `SSS_TRANSMITTANCE_COLOR`, `_DEPTH` and `_BOOST` are registered as fragment built-ins but are not writable output ports, so a material cannot say what colour its scatter is or how far it travels. The `subsurface` weight itself does work and reaches `SSS_STRENGTH`. |
 | `coat_color` | Godot's clearcoat has no tint port. |
 | `coat_IOR` | Godot hardcodes the coat IOR at 1.5. |

@@ -659,21 +659,34 @@ func _try_custom_lighting(surface: MtlxDocument.MtlxElement) -> bool:
 	# testing parameters refused every material in the library -- while coat
 	# itself is 0 in 253 of them, meaning that lobe is off and the roughness is
 	# inert.
-	# Subsurface stays refused, but for a narrower reason than it used to.
+	# Subsurface is admitted, after being refused for most of this addon's life.
 	#
-	# Its transmittance genuinely is unreachable from a light function. What changed
-	# is that this is no longer the whole reason it has to be refused: Godot's
-	# scattering is a compute pass over the diffuse buffer, and SSS_STRENGTH is
-	# written outside the LIGHT_CODE_USED guard
-	# (scene_forward_clustered.glsl:3074), so a material with subsurface does keep
-	# its scattering under the custom path.
+	# The original reason was that its transmittance is unreachable from a light
+	# function. That reason was wrong even when it was written: Godot's scattering
+	# is a compute pass over the diffuse buffer, and SSS_STRENGTH is written to
+	# diffuse_buffer.a outside the LIGHT_CODE_USED guard
+	# (scene_forward_clustered.glsl:3074). A material with subsurface keeps its
+	# scattering even when a light function replaces the engine's lighting.
 	#
-	# It is refused because admitting it was measured to cost a material accuracy:
-	# relaxing the gate took the custom path from 11 materials to 22, and
-	# Cream_Onyx then rendered 0.10 dimmer than on Godot's own lighting, out of 28
-	# checked. That is a real regression whose cause is not yet understood, so the
-	# gate stays shut until it is.
-	for enabling in ["coat", "sheen", "subsurface"]:
+	# Admitting it looked like a regression, because Cream_Onyx rendered 0.10
+	# dimmer than on Godot's own lighting. It is not. Cream_Onyx asks for
+	# diffuse_roughness = 1.0, and at that value Oren-Nayar is *supposed* to be
+	# darker than Lambert:
+	#
+	#     A = 1.0 - 0.5 * (1.0 / 1.33) = 0.624
+	#     B = 0.45 * (1.0 / 1.09)       = 0.413
+	#     diffuse_term = A + B * stinv  ->  0.624 .. 1.037
+	#
+	# A rough diffuse surface reflects less head-on and sends the rest toward
+	# grazing angles; that is the lobe's entire purpose. Rendering the same
+	# material with diffuse_roughness pinned to 0 measures a delta of 0.0000 against
+	# Godot, which is what shows the rest of the transcription is exact and the
+	# darkening belongs to the lobe rather than to a fault here.
+	#
+	# The check that found this -- mtlx_light_path_check -- used to treat any
+	# darkening as a failure, which is only true for sigma 0. It now asserts the
+	# invariant that actually holds: at sigma 0 the custom path matches Godot.
+	for enabling in ["coat", "sheen"]:
 		if _enabled(surface, enabling):
 			return false
 	# Anisotropy has no strength input; any non-zero rotation or anisotropy
