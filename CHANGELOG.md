@@ -5,6 +5,32 @@ All notable changes to this project are documented here.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 the project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.2.0] — 2026-09-30
+
+### Changed
+
+- **Convert now writes a `ShaderMaterial`, not a bare `VisualShader`.** The
+  exported `.tres` loads straight onto a mesh's surface material override. A
+  `VisualShader` cannot be dropped on a mesh, so before this every user who wanted
+  a material had to build a container by hand for each one — tedious if a level
+  editor is generating materials rather than authoring them.
+
+  The converted shader is embedded as a sub-resource, so the file is
+  self-contained. It is also larger than a bare shader resource, since a converted
+  graph serialises in full.
+
+### Fixed
+
+- **Refraction was wired but inert.** `VisualShaderNodeInput` takes the built-in's
+  lowercase key, not its GLSL spelling — `VisualShaderNodeInput::ports` carries
+  both (`visual_shader.cpp:3341-3351`). `"Normal"`, `"View"` and `"ScreenUV"` missed
+  the table, which is not an error: the node kept its default and the generated
+  code showed `float n_out = 0.0;` where a `vec2` was meant. `NORMAL` and `VIEW`
+  were both zero, `refract()` returned a zero vector, the offset was zero, and the
+  screen texture was sampled at a constant corner pixel. Still default-off: the
+  offset responds to `refraction_strength`, but at the shipped default of 0.02 the
+  displacement is below what an 8-bit capture resolves.
+
 ## [1.1.0] — 2026-09-30
 
 ### Fixed

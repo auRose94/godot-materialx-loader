@@ -102,6 +102,24 @@ load at runtime**. Run **Convert .mtlx to .tres** and ship the generated
 `.tres`, which is what a build should use anyway: it moves the conversion cost
 out of load time.
 
+Each `.tres` is a **`ShaderMaterial` with the converted `VisualShader` embedded**
+in it, not a bare shader. That is deliberate: a `VisualShader` is not something you
+can drop on a mesh, so every user would otherwise have to hand-build a
+`ShaderMaterial` per material just to hold it. As exported, the file loads
+straight onto a `MeshInstance3D`'s **Surface Material Override**, which is what a
+level editor wants.
+
+The shader is embedded rather than referenced, so the file is self-contained and
+carries no path back to the `.mtlx`. The trade-off is size: a converted graph is
+serialised in full, so these files are considerably larger than a bare shader
+resource.
+
+Note that `ShaderMaterial` has exactly three properties in Godot 4.7 — `shader`,
+`render_priority` and `next_pass` (`material.cpp:491-540`). `cull_mode`,
+`depth_draw_mode` and the depth-prepass flags all live on `BaseMaterial3D`, which
+is not a substitute here: it has its own BRDF and **no `shader` property at all**,
+so a `VisualShader` cannot be attached to one.
+
 ## Metals look black
 
 Not a conversion bug. A metal has no diffuse response — all of its appearance is

@@ -379,6 +379,32 @@ func _list_mtlx(dir_path: String) -> PackedStringArray:
 	return out
 
 
+## Wraps the converted shader in a ShaderMaterial, which is what gets written out.
+##
+## A bare VisualShader is not something a level editor can drop on a mesh. It has
+## to be put inside a ShaderMaterial by hand first, which is a container per
+## material for every user who wants one. Exporting the material instead means the
+## .tres loads straight onto a MeshInstance3D's surface material override, and the
+## VisualShader travels inside it as a sub-resource.
+##
+## ShaderMaterial is the right wrapper and BaseMaterial3D is the trap. Godot 4.7
+## gives ShaderMaterial exactly three properties -- shader, render_priority and
+## next_pass (material.cpp:491-540) -- which is why cull_mode and depth_draw_mode
+## are unavailable here and why they cannot be configured on the output at all.
+## BaseMaterial3D has those, and several other render settings, but has no `shader`
+## property whatsoever: it is its own BRDF, not a container, so assigning a
+## VisualShader to one is impossible rather than merely discouraged.
+##
+## The VisualShader is embedded rather than referenced, so the .tres is
+## self-contained. That is the point for an exported material, and it does mean the
+## file is larger than a bare shader would be.
+
+func _as_material(result: Emitter.Result) -> Resource:
+	var mat := ShaderMaterial.new()
+	mat.shader = result.shader
+	return mat
+
+
 func _on_convert() -> void:
 	var dir: String = _folder.text.strip_edges()
 	var files: PackedStringArray = _list_mtlx(dir)
@@ -400,7 +426,7 @@ func _on_convert() -> void:
 
 		var out_path: String = path.get_basename() + ".tres"
 		if not _dry_run:
-			var err: Error = ResourceSaver.save(result.shader, out_path)
+			var err: Error = ResourceSaver.save(_as_material(result), out_path)
 			if err != OK:
 				failed += 1
 				_log.text += "[color=red]SAVE FAIL[/color] %s (err %d)\n" % [out_path, err]
