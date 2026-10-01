@@ -63,6 +63,12 @@ static func install_defaults() -> bool:
 		"hint": PROPERTY_HINT_RANGE,
 		"hint_string": "%d,%d,8" % [MIN_PREVIEW_SIZE, MAX_PREVIEW_SIZE],
 	}) or wrote
+	# Experimental, so off unless asked for -- but it still has to be
+	# registered, or it is never created and never appears in the Project
+	# Settings window.
+	wrote = _set_if_missing(EXPERIMENTAL_CUSTOM_LIGHTING, false, {
+		"type": TYPE_BOOL,
+	}) or wrote
 	return wrote
 
 
