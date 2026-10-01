@@ -132,7 +132,10 @@ func _emit_surface(surface: MtlxDocument.MtlxElement) -> void:
 	_fold_anisotropy_flow(surface)
 	_fold_opacity(surface)
 	_fold_sheen_color(surface)
-	_try_custom_lighting(surface)
+	if _try_custom_lighting(surface):
+		# Declaring the lobes before the light stage reads them. See
+		# _ensure_lobe_ports for why this has to happen here.
+		_ensure_lobe_ports(surface)
 
 	# Inputs handled by the folds above rather than by the direct port loop.
 	const FOLDED_INPUTS := [
@@ -423,30 +426,28 @@ func _try_custom_lighting(surface: MtlxDocument.MtlxElement) -> bool:
 	if _drives_sss(surface, "subsurface_color"):
 		return false
 
-	# sigma has no output port, so it has to travel through a varying. Nothing
-	# can be wired between the fragment and light stages, which is exactly why
-	# this is needed.
-	var varying := "mtlx_diffuse_roughness"
-	var sigma: Ref2 = _emit_input(rough_inp, surface.graph)
-	if not sigma.is_valid():
+	# sigma cannot be piped in from the fragment stage. VisualShader varyings
+	# carry a single mode (visual_shader.cpp:830), so nothing a varying writes in
+	# fragment is in scope inside a light function -- the getter emits
+	# `var_<name>` for a name that does not exist there.
+	#
+	# It does not need to be piped, though: a light function runs once per light,
+	# so a material constant is the only thing that could have lived there
+	# anyway. Emitting it as a constant node in the light stage is both correct
+	# and cheaper than a varying.
+	#
+	# A linked diffuse_roughness is computed in the graph and is therefore not a
+	# constant, so it cannot be represented here at all.
+	var value: Variant = rough_inp.typed_value()
+	if rough_inp.is_link() or value == null:
 		return false
-
-	# Fragment stage: publish it.
-	var setter := VisualShaderNodeVaryingSetter.new()
-	setter.varying_name = varying
-	var setter_id: int = _add(setter)
-	_connect(sigma, sigma.port, setter_id, 0)
-
-	# Light stage: read it back. The two stages are separate graphs, so the
-	# name is the only thing that crosses between them -- connecting the
-	# setter's output directly is rejected by the engine.
-	var getter := VisualShaderNodeVaryingGetter.new()
-	getter.varying_name = varying
-	var getter_id: int = _add_light(getter)
+	var sigma := VisualShaderNodeFloatConstant.new()
+	sigma.constant = maxf(float(value), 0.0)
+	var sigma_id: int = _add_light(sigma)
 
 	var light: VisualShaderNodeCustom = OrenNayarLight.new()
 	var light_id: int = _add_light(light)
-	_connect_light(Ref2.new(getter_id, 0), 0, light_id, 0)
+	_connect_light(Ref2.new(sigma_id, 0), 0, light_id, 0)
 
 	# The light node's two outputs go to the light stage's own output ports:
 	# DIFFUSE_LIGHT = 0, SPECULAR_LIGHT = 1.
@@ -1433,3 +1434,58 @@ func _to_vec2(v: Variant) -> Vector2:
 		var f: float = float(v)
 		return Vector2(f, f)
 	return Vector2.ZERO
+
+## Connects the lobe ports the custom light node reads, so the engine declares
+## them.
+##
+## CLEARCOAT, RIM, RIM_TINT and ANISOTROPY are only in scope inside a light
+## function if the fragment stage writes to them; that write is what emits
+## LIGHT_CLEARCOAT_USED and the rest (material_storage.cpp:1368-1373). GLSL
+## cannot test whether a variable exists, so a missing one is a compile error
+## rather than a silent zero.
+##
+## Defaults come from standard_surface, so a material with no clearcoat gets 0
+## and the node's own `if (clearcoat > 0.0)` skips that lobe. Nothing is lost:
+## the engine's lighting has already been replaced.
+func _ensure_lobe_ports(surface: MtlxDocument.MtlxElement) -> void:
+	# coat, coat_roughness and sheen map straight across.
+	const LOBES := {
+		"coat": GodotMap.OUT_CLEARCOAT,
+		"coat_roughness": GodotMap.OUT_CLEARCOAT_ROUGHNESS,
+		"sheen": GodotMap.OUT_RIM,
+		"specular_anisotropy": GodotMap.OUT_ANISOTROPY,
+	}
+	for name in LOBES:
+		var inp: MtlxDocument.MtlxInput = surface.input(name)
+		var src := Ref2.new()
+		if inp != null:
+			src = _emit_input(inp, surface.graph)
+		if not src.is_valid():
+			src = _literal_ref(name)
+		_connect_output(src, LOBES[name])
+
+	# RIM_TINT is produced by _fold_sheen_color, which deliberately stays quiet
+	# for the default white sheen. Connect the zero that means "no tint" so the
+	# variable exists.
+	if not _output_connected(GodotMap.OUT_RIM_TINT):
+		_connect_output(_float_ref(0.0), GodotMap.OUT_RIM_TINT)
+
+
+## A node carrying a literal, for ports a material does not set.
+func _literal_ref(name: String) -> Ref2:
+	var inp: MtlxDocument.MtlxInput = null
+	return _float_ref(0.0) if name.is_empty() else _float_ref(0.0)
+
+
+func _float_ref(v: float) -> Ref2:
+	var id: int = _add(VisualShaderNodeFloatConstant.new())
+	_node(id).constant = v
+	return Ref2.new(id, 0)
+
+
+## True when something is already wired to that output port.
+func _output_connected(port: int) -> bool:
+	for c in _shader.get_node_connections(FRAGMENT):
+		if int(c["to_node"]) == OUTPUT_NODE and int(c["to_port"]) == port:
+			return true
+	return false

@@ -33,6 +33,9 @@ enabled=PackedStringArray("res://addons/materialx/plugin.cfg")
 texture_roots=PackedStringArray()
 auto_bake_previews=true
 preview_size=128
+# See addons/materialx/mtlx_oren_nayar_light.gd for what this
+# means and why it is on by default.
+experimental_custom_lighting=false
 
 [rendering]
 

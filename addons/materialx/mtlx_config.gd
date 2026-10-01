@@ -25,15 +25,17 @@ const TEXTURE_ROOTS := PREFIX + "texture_roots"
 const AUTO_BAKE := PREFIX + "auto_bake_previews"
 ## Edge length of a baked thumbnail, in pixels.
 const PREVIEW_SIZE := PREFIX + "preview_size"
-## Experimental: evaluate MaterialX diffuse_roughness with an Oren-Nayar lobe.
+## Evaluate MaterialX diffuse_roughness with an Oren-Nayar lobe.
 ##
-## Off by default. When on, a material that drives diffuse_roughness away from
-## the default (and does not use subsurface scattering) gets Godot's whole
-## lighting model reimplemented in the light stage, with the Lambert term
-## replaced. At diffuse_roughness 0 that is identical to Godot's own path, so
-## this is a real substitution rather than an approximation -- but it is still
-## a copy of engine code, and engine code changes. Treat it as a preview of
-## what this addon could do, not as settled behaviour.
+## Off by default, and still called "experimental" because the cost is real: a
+## material that uses this has Godot's whole lighting model reimplemented in the
+## light stage, so this addon -- not the engine -- is now responsible for the
+## result. Turn it off to fall back to Godot's own BRDF, which is the escape
+## hatch if Godot fixes a lighting bug and you would rather have that than this.
+##
+## At diffuse_roughness 0 MaterialX's Oren-Nayar term is exactly 1.0, which is
+## Lambert, so for a material that sets it the substitution is faithful rather
+## than approximate.
 const EXPERIMENTAL_CUSTOM_LIGHTING := PREFIX + "experimental_custom_lighting"
 
 ## Smallest useful thumbnail. Below this the bake costs the same and looks worse.

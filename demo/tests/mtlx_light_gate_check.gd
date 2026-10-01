@@ -54,7 +54,7 @@ func _init() -> void:
 	print("\n  fragment nodes: %d, light nodes: %d" % [
 		on.shader.get_node_list(1).size(), on.shader.get_node_list(LIGHT).size()])
 	_expect(_light_user_nodes(on.shader) == 2,
-		"flag on: the varying getter and the light node were added")
+		"flag on: the sigma constant and the light node were added")
 	_expect(on.shader.code.contains(OREN_MARKER),
 		"flag on: the Oren-Nayar term is in the generated code")
 	_expect(on.shader.get_node_connections(LIGHT).size() >= 2,

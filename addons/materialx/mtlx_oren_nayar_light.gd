@@ -130,7 +130,13 @@ func _get_code(input_vars: Array, output_vars: Array,
 		mode: Shader.Mode, type: VisualShader.Type) -> String:
 	# sigma arrives through a varying; everything else is a light-stage
 	# built-in, so it needs no connection.
-	return _SHADER.format([input_vars[0], output_vars[0], output_vars[1]])
+	# A Dictionary, because the template uses named placeholders. With an
+	# Array, String.format expects {0}/{1} and leaves {sigma} untouched.
+	return _SHADER.format({
+		"sigma": input_vars[0],
+		"diffuse_out": output_vars[0],
+		"specular_out": output_vars[1],
+	})
 
 
 func _is_highend() -> bool:
