@@ -6,7 +6,13 @@ with real material thumbnails in the FileSystem dock.
 
 No C++ build. Copy the `addons/materialx` folder into your project and enable it.
 
-![A converted MaterialX sphere in a Godot scene](docs/preview.png)
+![Nine converted MaterialX materials on spheres, rendered by Godot under a procedural sky](docs/preview.png)
+
+*Nine `.mtlx` files converted and rendered unmodified: Gold, Glass, Rubber and
+Grid_Paint in the top row, then Black Upholstery, Glazed Cube Pattern Tiles,
+TH Blue Denim Fabric, Gold Foil and Perforated Metal. Every material on this
+page went through the same converter — tiling normal maps, height, clearcoat,
+sheen and all.**
 
 ---
 
