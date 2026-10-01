@@ -124,12 +124,13 @@ func _emit_surface(surface: MtlxDocument.MtlxElement) -> void:
 	_fold_specular(surface)
 	_fold_anisotropy_flow(surface)
 	_fold_opacity(surface)
+	_fold_sheen_color(surface)
 
 	# Inputs handled by the folds above rather than by the direct port loop.
 	const FOLDED_INPUTS := [
 		"base", "base_color", "emission", "emission_color",
 		"specular", "specular_IOR", "specular_color",
-		"specular_rotation", "opacity", "transmission",
+		"specular_rotation", "opacity", "transmission", "sheen_color",
 	]
 	for key in GodotMap.SURFACE_PORTS.keys():
 		var name: String = key
@@ -381,6 +382,38 @@ func _fold_opacity(surface: MtlxDocument.MtlxElement) -> void:
 	_connect_output(out_ref, GodotMap.OUT_ALPHA)
 
 
+## Godot's RIM_TINT is a scalar, not a colour.
+##
+## scene_forward_lights_inc.glsl:193 mixes the rim between white and the albedo
+## by it:
+##     diffuse_light += rim_light * rim * mix(vec3(1.0), albedo, rim_tint) * light_color;
+## so 0 leaves the sheen white and 1 tints it with the base colour. MaterialX's
+## sheen_color is a colour, so it has to be reduced to "how far from white is
+## this sheen", which is one minus its luminance. A white sheen -- the MaterialX
+## default -- therefore yields 0 and stays white, which is the case that has to
+## be right.
+##
+## This loses hue: two different saturated sheens with equal brightness both land
+## on the same tint. RIM_TINT is a scalar, so there is nothing better to map.
+func _fold_sheen_color(surface: MtlxDocument.MtlxElement) -> void:
+	var inp: MtlxDocument.MtlxInput = surface.input("sheen_color")
+	if inp == null:
+		return
+	# The default is opaque white, which is tint 0 and therefore a no-op.
+	if not inp.is_link() and GodotMap.is_default("sheen_color", GodotMap._as_vector3(_literal(inp, null))):
+		return
+
+	var src: Ref2 = _emit_input_or_null(inp, surface.graph)
+	if not src.is_valid():
+		return
+	var luma: Ref2 = _luminance_ref(src)
+	var one_minus: Ref2 = _fop(GodotMap.FOP_SUB, 1.0, luma)
+	# Clamp into 0..1, since a saturated sheen has luminance below 1.
+	var clamped: Ref2 = _fop(GodotMap.FOP_MIN, one_minus, 1.0)
+	var clamped2: Ref2 = _fop(GodotMap.FOP_MAX, clamped, 0.0)
+	_connect_output(clamped2, GodotMap.OUT_RIM_TINT)
+
+
 ## The surface's opacity as a scalar, or an invalid ref when it is opaque.
 func _opacity_ref(surface: MtlxDocument.MtlxElement) -> Ref2:
 	var inp: MtlxDocument.MtlxInput = surface.input("opacity")
@@ -401,6 +434,15 @@ func _opacity_ref(surface: MtlxDocument.MtlxElement) -> Ref2:
 		return src
 
 	# Rec.709 luminance, matching MaterialX's own reduction of opacity.
+	return _luminance_ref(src)
+
+
+## A colour reduced to a scalar by Rec.709 luminance.
+##
+## The weights are MaterialX's, not Godot's: MaterialX reduces colour to a
+## scalar with this exact formula (standard_surface.mtlx uses luminance + extract
+## on opacity), so matching it is what keeps a converted value identical.
+func _luminance_ref(src: Ref2) -> Ref2:
 	var wid: int = _add(VisualShaderNodeVec3Constant.new())
 	var wnode: VisualShaderNodeVec3Constant = _node(wid)
 	wnode.constant = Vector3(0.2126, 0.7152, 0.0722)
@@ -1017,13 +1059,74 @@ func _emit_overlay(el: MtlxDocument.MtlxElement) -> Ref2:
 	return Ref2.new(id, 0)
 
 
+## hsvadjust: convert to HSV, add to hue, scale saturation and value, convert
+## back.
+##
+## The spec (MaterialX.StandardNodes.md, node-hsvadjust) defines this as
+## RGB -> HSV, then hue += amount.x, saturation *= amount.y, value *= amount.z,
+## then HSV -> RGB. Hue wraps at the 0..1 boundaries and amount.x of 1.0 is a
+## no-op, since 1.0 is a full 360 degree turn.
+##
+## This needed no custom GLSL after all: VisualShaderNodeColorFunc has
+## FUNC_RGB2HSV and FUNC_HSV2RGB, so the whole node is four native nodes. An
+## earlier version of this file claimed it was not representable and passed the
+## value through as identity, which was wrong -- the conversions Godot was
+## missing were on the node, not the function list.
 func _emit_hsvadjust(el: MtlxDocument.MtlxElement) -> Ref2:
-	# Godot 4.7 has no HSV node. A VisualShaderNodeCustom would work but needs
-	# a registered script; the value is approximated by identity and reported.
-	var src: Ref2 = _emit_input_or_null(el.input("in"), el.graph)
-	if src.is_valid():
-		_notes.append("hsvadjust is not representable in Godot 4.7; passed through unchanged")
-	return src if src.is_valid() else Ref2.new()
+	var colour: Ref2 = _emit_input_or_null(el.input("in"), el.graph)
+	if not colour.is_valid():
+		return Ref2.new()
+	var amount: Ref2 = _emit_input_or_null(el.input("amount"), el.graph)
+	if not amount.is_valid():
+		return colour  # nothing to adjust by; identity
+
+	# colour -> hsv
+	var to_hsv: int = _add(VisualShaderNodeColorFunc.new())
+	var th: VisualShaderNodeColorFunc = _node(to_hsv)
+	th.function = VisualShaderNodeColorFunc.FUNC_RGB2HSV
+	_connect(colour, colour.port, to_hsv, 0)
+
+	# Split both vectors so each channel can be adjusted on its own.
+	var hsv_parts: int = _add(VisualShaderNodeVectorDecompose.new())
+	_node(hsv_parts).op_type = VisualShaderNodeVectorBase.OP_TYPE_VECTOR_3D
+	_connect(Ref2.new(to_hsv, 0), 0, hsv_parts, 0)
+	var amount_parts: int = _add(VisualShaderNodeVectorDecompose.new())
+	_node(amount_parts).op_type = VisualShaderNodeVectorBase.OP_TYPE_VECTOR_3D
+	_connect(amount, amount.port, amount_parts, 0)
+
+	# hue += amount.x, wrapped. fract() is what implements the wrap-around.
+	var hue: Ref2 = _component_op(hsv_parts, 0, GodotMap.FOP_ADD, amount_parts, 0)
+	var wrapped: int = _add(VisualShaderNodeFloatFunc.new())
+	var wrap_fn: VisualShaderNodeFloatFunc = _node(wrapped)
+	wrap_fn.function = VisualShaderNodeFloatFunc.FUNC_FRACT
+	_connect(hue, hue.port, wrapped, 0)
+
+	# saturation *= amount.y, value *= amount.z
+	var sat: Ref2 = _component_op(hsv_parts, 1, GodotMap.FOP_MUL, amount_parts, 1)
+	var val: Ref2 = _component_op(hsv_parts, 2, GodotMap.FOP_MUL, amount_parts, 2)
+
+	var rebuilt: int = _add(VisualShaderNodeVectorCompose.new())
+	_node(rebuilt).op_type = VisualShaderNodeVectorBase.OP_TYPE_VECTOR_3D
+	_connect(Ref2.new(wrapped, 0), 0, rebuilt, 0)
+	_connect(sat, 0, rebuilt, 1)
+	_connect(val, 0, rebuilt, 2)
+
+	# hsv -> colour
+	var to_rgb: int = _add(VisualShaderNodeColorFunc.new())
+	var tr: VisualShaderNodeColorFunc = _node(to_rgb)
+	tr.function = VisualShaderNodeColorFunc.FUNC_HSV2RGB
+	_connect(Ref2.new(rebuilt, 0), 0, to_rgb, 0)
+	return Ref2.new(to_rgb, 0)
+
+
+## One channel of two decomposed vectors, put through a float operation.
+func _component_op(a_id: int, a_idx: int, op: int, b_id: int, b_idx: int) -> Ref2:
+	var id: int = _add(VisualShaderNodeFloatOp.new())
+	var node: VisualShaderNodeFloatOp = _node(id)
+	node.operator = op
+	_connect(Ref2.new(a_id, 0), a_idx, id, 0)
+	_connect(Ref2.new(b_id, 0), b_idx, id, 1)
+	return Ref2.new(id, 0)
 
 
 func _emit_tiledimage(el: MtlxDocument.MtlxElement) -> Ref2:

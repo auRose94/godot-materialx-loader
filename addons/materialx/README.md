@@ -330,7 +330,7 @@ Current state across the 277 files:
 | `coat_color` | 2 | Godot's clearcoat has no tint |
 | `specular_rotation` | 2 | no anisotropy rotation on the output |
 | `opacity` | 2 | wiring `ALPHA` would make every material transparent |
-| `hsvadjust` | 12 | no HSV node in Godot 4.7; passed through and flagged |
+| `hsvadjust` | 12 | implemented: RGB2HSV/HSV2RGB are native ColorFunc functions |
 
 `diffuse_roughness` is the one most likely to be visible: it is what makes rough
 dielectrics (brick, concrete, fabric) look flat rather than shiny.
@@ -345,7 +345,7 @@ remainder listed rather than guessed at.
 * `Wood_Beech_Raw.mtlx` references `Wood_Beech_Raw_Mask.png` / `_Normal.png` but
   the files on disk are lowercase. This works on Windows/macOS and fails on
   Linux, so there is a case-insensitive fallback that logs what it resolved.
-* `hsvadjust` passes through unchanged rather than being approximated.
+* ~~`hsvadjust` passes through unchanged~~ -- this was wrong. `VisualShaderNodeColorFunc` has `FUNC_RGB2HSV` and `FUNC_HSV2RGB`, so it is now implemented with four native nodes.
 * A `.mtlx` exporting several `<surfacematerial>` nodes converts only the first.
 
 ---

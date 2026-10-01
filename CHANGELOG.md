@@ -7,6 +7,20 @@ the project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [1.0.0] — 2026-09-30
 
+### Added (unreleased)
+
+- **`sheen` → `RIM`, `sheen_color` → `RIM_TINT`.** Godot has both ports, and
+  writing to them defines `LIGHT_RIM_USED`, so no material flag is needed.
+  Sheen and rim are both grazing-angle lobes, so this is an analogue rather than
+  an identity. `RIM_TINT` is a scalar (`mix(white, albedo, rim_tint)`), so a
+  colour is reduced to one minus its Rec.709 luminance — white, the MaterialX
+  default, correctly yields a no-op.
+- **`hsvadjust` is implemented.** Previously reported as "not representable",
+  which was wrong: `VisualShaderNodeColorFunc` already has `FUNC_RGB2HSV` and
+  `FUNC_HSV2RGB`, so the node is four native nodes and no custom GLSL. Hue
+  wrapping uses `fract`, as the spec requires. Affects 12 materials in the
+  reference library.
+
 First public release.
 
 ### Added

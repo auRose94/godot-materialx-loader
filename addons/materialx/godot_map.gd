@@ -192,6 +192,15 @@ const SURFACE_PORTS := {
 	"specular_roughness": OUT_ROUGHNESS,
 	"coat": OUT_CLEARCOAT,
 	"coat_roughness": OUT_CLEARCOAT_ROUGHNESS,
+	# Sheen maps to Godot's rim. Both are grazing-angle lobes, so this is a
+	# close analogue rather than an identity: MaterialX's sheen is
+	# retroreflective and roughness-dependent, whereas Godot's rim is
+	# fresnel-weighted and takes its exponent from the surface roughness
+	# (scene_forward_lights_inc.glsl: rim_light = pow(1 - N.V, (1 - roughness) * 16)).
+	"sheen": OUT_RIM,
+	# sheen_color is a colour and RIM_TINT is a scalar, so it has to be folded
+	# down; see _fold_sheen_color in mtlx_emitter.gd.
+	"sheen_color": FOLDED,
 	"specular_anisotropy": OUT_ANISOTROPY,
 	"subsurface": OUT_SSS_STRENGTH,
 	"normal": OUT_NORMAL_MAP,
@@ -224,9 +233,7 @@ const SURFACE_DROPS := {
 	"coat_IOR": "Godot hardcodes the coat IOR at 1.5",
 	"coat_affect_color": "Godot's clearcoat does not tint the layer below",
 	"coat_affect_roughness": "Godot's clearcoat does not affect base roughness",
-	"sheen": "no sheen lobe in Godot's spatial BRDF",
-	"sheen_color": "no sheen lobe in Godot's spatial BRDF",
-	"sheen_roughness": "no sheen lobe in Godot's spatial BRDF",
+	"sheen_roughness": "Godot's rim has no roughness term; its exponent comes from the surface roughness",
 	"subsurface_color": "Godot's SSS takes a radius and depth, not a colour",
 	"subsurface_radius": "Godot's SSS radius is per-object, not per-material",
 	"subsurface_scale": "Godot's SSS radius is per-object, not per-material",

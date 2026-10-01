@@ -28,3 +28,9 @@ demo/*.zip
 Thumbs.db
 *~
 *.swp
+
+# addons/materialx is symlinked into a working project during development, so
+# that project's editor imports the icon through the link and writes an .import
+# file back here. It belongs to that project, not to this repository, whose root
+# is deliberately not a Godot project.
+addons/materialx/*.import

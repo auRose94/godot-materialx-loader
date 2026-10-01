@@ -102,12 +102,20 @@ reported in the dock rather than silently approximated.
 
 | Input | Why it is dropped |
 |---|---|
-| `diffuse_roughness` | Feeds MaterialX's Oren-Nayar diffuse lobe. Godot's spatial BRDF has no diffuse-roughness port. |
+| `diffuse_roughness` | Oren-Nayar needs the light and view vectors per light, so it can only be evaluated in the light stage. Writing `Diffuse Light` sets `LIGHT_CODE_USED`, which makes Godot skip its *entire* lighting model (`scene_forward_lights_inc.glsl:121`). Matching it would mean reimplementing specular, clearcoat, rim, anisotropy and SSS, and drifting from Godot whenever its BRDF changes. Not worth it for a diffuse-only refinement. |
 | `subsurface_color`, `subsurface_radius`, `subsurface_scale` | Godot's subsurface scattering takes a radius and depth per object, not a per-material colour and radius. |
 | `coat_color` | Godot's clearcoat has no tint port. |
-| `sheen`, `sheen_color`, `sheen_roughness` | No sheen lobe in Godot's spatial BRDF. |
+| `coat_IOR` | Godot hardcodes the coat IOR at 1.5. |
+| `sheen_roughness` | Godot's rim has no roughness term; its exponent comes from the surface roughness instead. |
 | `transmission`, `transmission_depth`, `transmission_scatter`, `transmission_color`, `transmission_dispersion` | No refraction lobe in Godot's spatial BRDF. Folded into `ALPHA` (`max(1 - transmission, 0.15)`), which is an approximation. |
-| `hsvadjust` | Not representable in Godot 4.7. Passed through unchanged rather than approximated. |
+
+Deliberately approximated rather than dropped, because a partial match beats
+nothing:
+
+| Input | How it is approximated |
+|---|---|
+| `sheen` | Mapped to Godot's `RIM`. Both are grazing-angle lobes, so it is a close analogue, not an identity: MaterialX's sheen is retroreflective and roughness-dependent, Godot's rim is fresnel-weighted with an exponent taken from the surface roughness. |
+| `sheen_color` | Mapped to `RIM_TINT`, which is a scalar (`mix(white, albedo, rim_tint)`). The colour is reduced to "how far from white", i.e. one minus its Rec.709 luminance, so white — the MaterialX default — is a no-op. Hue is lost: two sheens of equal brightness land on the same tint. |
 
 Other limits:
 
@@ -142,6 +150,7 @@ The suite finds `.mtlx` files automatically, so the argument is optional.
 | `tests/mtlx_cache_tools_check.gd` | the preview-cache buttons and cache-key format |
 | `tests/mtlx_autobake_check.gd` | auto-baker produces real renders (needs a GPU) |
 | `tests/mtlx_baker_backoff_check.gd` | a failing material backs off instead of retrying forever |
+| `tests/mtlx_new_conversions_check.gd` | `hsvadjust` builds a real HSV round trip; `sheen` drives `RIM`, `sheen_color` drives `RIM_TINT` |
 | `tests/mtlx_thumb_check.gd` | CPU thumbnail rendering |
 
 Most run headless. The two that render need a real driver, because the headless
