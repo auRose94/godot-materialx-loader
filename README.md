@@ -2,7 +2,6 @@
 
 Load [MaterialX](https://materialx.org) `.mtlx` files into Godot as
 [Visual Shaders](https://docs.godotengine.org/en/stable/tutorials/shaders/shader_reference/spatial_shader.html),
-with real material thumbnails in the FileSystem dock.
 
 No C++ build. Copy the `addons/materialx` folder into your project and enable it.
 
@@ -22,8 +21,6 @@ Drop a `.mtlx` file anywhere in your project and it becomes a `VisualShader`:
 
 - **Loads directly.** `load("res://art/Bricks.mtlx")` returns a `VisualShader`.
   No import step, no manual conversion.
-- **Material thumbnails.** `.mtlx` files show a shaded sphere in the FileSystem
-  dock instead of a generic icon.
 - **Correct conversion.** Specular reflectance, `mix()` polarity, sRGB handling
   and tangent-space normal maps are converted against the MaterialX and Godot
   specs rather than by eye. Seven of those conversions were silently wrong
@@ -54,8 +51,6 @@ All optional; the defaults work with no configuration.
 | Setting | Default | Meaning |
 |---|---|---|
 | `materialx/texture_roots` | `[]` | Extra directories to search for textures, tried before the `.mtlx`'s own directory. Leave empty for relative-to-source resolution. |
-| `materialx/auto_bake_previews` | `true` | Render thumbnails with the real shader in the background. |
-| `materialx/preview_size` | `128` | Edge length in pixels of a baked thumbnail. |
 | `materialx/custom_lighting` | `true` | Evaluate `diffuse_roughness` with an Oren-Nayar lobe. On by default because the lobe is MaterialX's own answer and Godot has no equivalent; turning it off falls back to Godot's Lambert. See [Oren-Nayar diffuse](#oren-nayar-diffuse) for what this costs. |
 
 Materials with a non-zero `diffuse_roughness` have Godot's whole lighting model
@@ -80,20 +75,6 @@ The dock appears on the right-hand side of the editor. It defaults to
   material references. A colour map used as `base_color` needs sRGB decoding; a
   tangent-space normal map needs BC5 compression. Getting these wrong makes
   materials look subtly flat or washed out.
-- **Rebuild all previews** / **Delete all previews** — clear and regenerate every
-  baked thumbnail.
-
-### About thumbnails and restarting the editor
-
-Godot caches each thumbnail in two places. The **on-disk** copy
-(`~/.cache/godot/resthumb-<md5>.png`) is keyed on the file's MD5, so an
-unchanged material keeps its old thumbnail indefinitely; the addon deletes that
-entry after every bake, so this never needs doing by hand.
-
-The **in-memory** copy is checked first and has no clearing API in 4.x. A
-thumbnail already generated in the current session therefore shows the old image
-until the editor restarts. Per-material refreshes appear to shift the mismatch
-rather than fix it — use **Rebuild all previews** and restart once.
 
 ## Exporting
 
@@ -128,8 +109,7 @@ near-black silhouettes with a single specular dot.
 
 Give the project an environment (`Project → Project Settings → Rendering →
 Environment → Default Environment`). Any sky or IBL works; the demo project
-ships one. Baked thumbnails use that same environment, so thumbnails and scenes
-match.
+ships one.
 
 ## Oren-Nayar diffuse
 
@@ -227,36 +207,22 @@ cd demo
 godot --headless --script tests/mtlx_corpus_check.gd -- res://path/to/materials
 ```
 
-The suite finds `.mtlx` files automatically, so the argument is optional.
-
-| script | checks |
-|---|---|
-| `tests/mtlx_corpus_check.gd` | every material: failures, dangling connections, missing textures, dropped inputs |
-| `tests/mtlx_specular_check.gd` | specular conversion against each file's declared IOR |
-| `tests/mtlx_mix_check.gd` | `mix()` fg/bg polarity — the inverted-blend bug |
-| `tests/mtlx_dependency_check.gd` | textures are reported as dependencies, including inside nodegraphs |
-| `tests/mtlx_loader_check.gd` | `.mtlx` loads as a `VisualShader` |
-| `tests/mtlx_dock_layout_check.gd` | dock fits the panel and stays scrollable |
-| `tests/mtlx_fixer_check.gd` | import repair is side-effect free; save/load round trip |
-| `tests/mtlx_cache_tools_check.gd` | the preview-cache buttons and cache-key format |
-| `tests/mtlx_autobake_check.gd` | auto-baker produces real renders (needs a GPU) |
-| `tests/mtlx_baker_backoff_check.gd` | a failing material backs off instead of retrying forever |
-| `tests/mtlx_new_conversions_check.gd` | `hsvadjust` builds a real HSV round trip; `sheen` drives `RIM`, `sheen_color` drives `RIM_TINT` |
-| `tests/mtlx_thumb_check.gd` | CPU thumbnail rendering |
-
-Most run headless. The two that render need a real driver, because the headless
-dummy renderer has no framebuffer:
+GPU-backed checks -- the live preview, the equivalence render, the refraction
+displacement -- need a framebuffer, and headless has none:
 
 ```bash
+cd demo
 xvfb-run -a godot --rendering-driver opengl3 --resolution 800x600 \
-    --script tests/mtlx_autobake_check.gd
+    --script tests/mtlx_refraction_render.gd
 ```
 
 ## Demo
 
 `demo/` is the test harness and a working example: four materials covering three
 conversion routes -- a pure metal, a normal-mapped surface, an sRGB colour
-texture, and a transmissive glass. Open it to see the thumbnails.
+texture, and a transmissive glass. Run **Convert .mtlx to .tres** to see them
+in the FileSystem dock, where the editor renders a preview of each material
+itself.
 
 ```bash
 godot --path demo

@@ -5,6 +5,31 @@ All notable changes to this project are documented here.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 the project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.3.0] — 2026-09-30
+
+### Removed
+
+- **The thumbnail pipeline.** `.mtlx` files no longer bake or cache material
+  previews, and the FileSystem dock shows the generic icon for one until you
+  convert it. Gone with it: `mtlx_preview_generator.gd`,
+  `mtlx_preview_baker.gd`, `mtlx_auto_baker.gd` and `mtlx_thumbnail.gd`, the
+  dock's bake controls, and the `materialx/auto_bake_previews` and
+  `materialx/preview_size` settings.
+
+  It existed only because the editor does not know what a `.mtlx` is. Converting
+  writes a `ShaderMaterial`, which the editor previews itself and correctly, so
+  the pipeline was solving a problem the export path had already solved — and
+  doing it twice: once on the CPU as an approximation that could not see materials
+  whose colour comes from packed masks, then again on the GPU, with a cache, a
+  watchdog and a failure backoff to keep it from spinning.
+
+  The settings are dropped rather than left in place, because a setting that no
+  longer reads anything looks configurable and is not.
+
+  The dock's **live preview** stays. It is a different thing: it shows the
+  converted shader for a material you are working on, before there is anything to
+  export.
+
 ## [1.2.0] — 2026-09-30
 
 ### Changed

@@ -12,7 +12,6 @@ extends VBoxContainer
 
 const Emitter := preload("res://addons/materialx/mtlx_emitter.gd")
 const Fixer := preload("res://addons/materialx/mtlx_texture_fixer.gd")
-const Baker := preload("res://addons/materialx/mtlx_preview_baker.gd")
 const Config := preload("res://addons/materialx/mtlx_config.gd")
 
 @export var plugin: EditorPlugin
@@ -24,13 +23,7 @@ var _convert_btn: Button
 var _fix_btn: Button
 var _live: MtlxLivePreview
 var _live_picker: OptionButton
-var _bake_btn: Button
-var _auto: CheckBox
-var _bake_progress: Label
 var _custom_lighting: CheckBox
-var _rebake_all_btn: Button
-var _clear_cache_btn: Button
-var _cache_info: Label
 var _live_paths: PackedStringArray = PackedStringArray()
 var _texture_roots: PackedStringArray = PackedStringArray()
 var _dry_run := true
@@ -101,7 +94,7 @@ func _ready() -> void:
 	body.add_child(_status)
 
 	# Live preview: the real converted shader on a sphere. This is the accurate
-	# one; the FileSystem thumbnails are a CPU approximation.
+	# one.
 	var sep := HSeparator.new()
 	body.add_child(sep)
 
@@ -121,26 +114,7 @@ func _ready() -> void:
 	_live_picker.item_selected.connect(_on_live_selected)
 	body.add_child(_live_picker)
 
-	_bake_btn = Button.new()
-	_bake_btn.text = "Save live preview as thumbnail"
-	_bake_btn.pressed.connect(_on_bake_preview)
-	body.add_child(_bake_btn)
-
-	# Automatic baking: every material whose preview is missing or older than
-	# its source gets a real GPU render, one per frame, without the user doing
-	# anything. See MtlxAutoBaker for why the CPU fallback is not enough.
-	_auto = CheckBox.new()
-	_auto.text = "Auto-bake thumbnails"
-	_auto.button_pressed = true
-	_auto.toggled.connect(_on_auto_toggled)
-	body.add_child(_auto)
-
-	_bake_progress = Label.new()
-	_bake_progress.text = ""
-	_bake_progress.clip_text = true
-	body.add_child(_bake_progress)
-
-	# Experimental custom lighting. Kept next to Auto-bake rather than only in
+	# Custom lighting. Kept here rather than only in
 	# Project Settings, because it is the one setting people need to flip in
 	# order to see what it does.
 	_custom_lighting = CheckBox.new()
@@ -159,32 +133,9 @@ func _ready() -> void:
 	cache_title.text = "Preview cache"
 	body.add_child(cache_title)
 
-	_rebake_all_btn = Button.new()
-	_rebake_all_btn.text = "Rebuild all previews"
-	_rebake_all_btn.tooltip_text = "Re-render every material and drop Godot's cached thumbnails. Restart the editor to see the new ones."
-	_rebake_all_btn.pressed.connect(_on_rebake_all)
-	body.add_child(_rebake_all_btn)
-
-	_clear_cache_btn = Button.new()
-	_clear_cache_btn.text = "Delete all previews"
-	_clear_cache_btn.tooltip_text = "Remove the baked renders and Godot's cached thumbnails. Regenerates on the next rebuild."
-	_clear_cache_btn.pressed.connect(_on_clear_cache)
-	body.add_child(_clear_cache_btn)
-
-	_cache_info = Label.new()
-	_cache_info.text = ""
-	_cache_info.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
-	body.add_child(_cache_info)
 
 
-	# Reflect the plugin's baker progress, if one is attached. Connected first,
-	# then counted, so startup baking updates the readout.
-	if plugin != null and plugin.get("_baker") != null:
-		var baker: Node = plugin.get("_baker")
-		if baker.has_signal("progress"):
-			baker.connect("progress", _on_bake_progress)
-			baker.connect("finished", _on_bake_finished)
-	_refresh_cache_info()
+
 
 	_log = RichTextLabel.new()
 	_log.bbcode_enabled = true
@@ -218,105 +169,6 @@ func _on_live_selected(index: int) -> void:
 		_live.show_material(_live_paths[index])
 
 
-## Writes the live preview to disk so the FileSystem dock shows this exact
-## render rather than the CPU approximation.
-func _on_bake_preview() -> void:
-	var path: String = _live.current_path()
-	if path == "":
-		_status.text = "[color=yellow]Pick a material first[/color]"
-		return
-	var err: Error = _live.bake_current(128)
-	if err == OK:
-		# Drop Godot's cached thumbnail so the dock regenerates from this render.
-		Baker.invalidate_preview_cache(path)
-		_status.text = "Baked thumbnail for %s" % path.get_file()
-		# Nudge the FileSystem so it regenerates and picks up the new PNG.
-		EditorInterface.get_resource_filesystem().update_file(path)
-	else:
-		_status.text = "[color=red]bake failed (%d)[/color]" % err
-
-
-func _on_auto_toggled(on: bool) -> void:
-	if plugin != null and plugin.has_method("set_auto_bake"):
-		plugin.set_auto_bake(on)
-	if on:
-		_status.text = "Auto-bake on"
-	else:
-		_bake_progress.text = ""
-		_status.text = "Auto-bake off"
-
-
-## Shows how many renders exist and where the cache lives.
-func _refresh_cache_info() -> void:
-	var baked := 0
-	var total := 0
-	var dir: String = _folder.text.strip_edges()
-	for f in _list_mtlx(dir):
-		total += 1
-		if Baker.is_baked(f):
-			baked += 1
-	_cache_info.text = "%d/%d rendered\ncache: %s" % [baked, total, Baker.editor_cache_dir()]
-
-
-## Deletes every render and every cached thumbnail, then re-renders everything.
-##
-## The manual escape hatch for when the auto-baker's output is not what you
-## want. Godot also holds thumbnails in memory for the rest of the session with
-## no API to clear that, so a restart is needed before the change shows in the
-## FileSystem dock.
-func _on_rebake_all() -> void:
-	var dir: String = _folder.text.strip_edges()
-	var files: PackedStringArray = _list_mtlx(dir)
-	if files.is_empty():
-		_status.text = "[color=yellow]No .mtlx files in %s[/color]" % dir
-		return
-
-	var invalidated := 0
-	for f in files:
-		var png: String = Baker.cache_path(f)
-		if FileAccess.file_exists(png):
-			DirAccess.remove_absolute(ProjectSettings.globalize_path(png))
-		if Baker.invalidate_preview_cache(f):
-			invalidated += 1
-
-	_refresh_cache_info()
-	_status.text = "Cleared previews, re-rendering %d material(s)..." % files.size()
-	_log.text += "Rebuilding %d previews (%d cached thumbnails invalidated)\n" % [
-		files.size(), invalidated]
-
-	if plugin == null or not plugin.has_method("bake_previews"):
-		_status.text = "[color=yellow]Auto-bake unavailable; is the plugin enabled?[/color]"
-		return
-
-	# The baker picks them up again immediately, since none are baked now.
-	plugin.set_auto_bake(true)
-	_auto.set_pressed_no_signal(true)
-	plugin.bake_previews()
-
-
-## Deletes every render and cached thumbnail without re-rendering.
-func _on_clear_cache() -> void:
-	var dir: String = _folder.text.strip_edges()
-	var files: PackedStringArray = _list_mtlx(dir)
-	var removed := 0
-	for f in files:
-		var png: String = Baker.cache_path(f)
-		if FileAccess.file_exists(png):
-			DirAccess.remove_absolute(ProjectSettings.globalize_path(png))
-			removed += 1
-		Baker.invalidate_preview_cache(f)
-
-	# The baker would immediately rebuild them, so hold it off until asked.
-	if plugin != null and plugin.has_method("set_auto_bake"):
-		plugin.set_auto_bake(false)
-	_auto.set_pressed_no_signal(false)
-
-	_refresh_cache_info()
-	_status.text = "Deleted %d render(s); auto-bake off." % removed
-
-
-## Flipping this changes the emitted shader, so anything already loaded keeps
-## its old graph until it is rebuilt. Say so rather than leaving it to be found.
 func _on_custom_lighting_toggled(on: bool) -> void:
 	ProjectSettings.set_setting(Config.CUSTOM_LIGHTING, on)
 	ProjectSettings.save()
@@ -326,27 +178,6 @@ func _on_custom_lighting_toggled(on: bool) -> void:
 		_status.text = "Oren-Nayar diffuse off -- rebuild previews to apply"
 
 
-func _on_bake_progress(done: int, total: int, current: String) -> void:
-	_bake_progress.text = "Baking %d/%d  %s" % [done, total, current]
-
-
-func _on_bake_finished(baked: int, failed: int = 0) -> void:
-	_refresh_cache_info()
-	if failed > 0:
-		# Not fatal: a material that cannot be rendered (no framebuffer yet, an
-		# unsupported shader) is retried later instead of every few seconds.
-		_bake_progress.text = "Baked %d, %d failed -- those retry in a couple of minutes" % [
-			baked, failed]
-	elif baked > 0:
-		_bake_progress.text = "Baked %d -- restart the editor to refresh the dock" % baked
-		# The FileSystem regenerates thumbnails on its own; nudging it makes that
-		# happen promptly rather than waiting for a manual refresh.
-		EditorInterface.get_resource_filesystem().scan()
-	else:
-		_bake_progress.text = "All previews up to date"
-
-
-## Offers the first folder under the project that actually contains .mtlx files.
 func _populate_folder() -> void:
 	_folder.text = _suggest_folder()
 

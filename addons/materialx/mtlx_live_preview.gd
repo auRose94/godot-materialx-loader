@@ -13,7 +13,6 @@ extends VBoxContainer
 ## directly (its previews are generated on a worker thread).
 
 const Emitter := preload("res://addons/materialx/mtlx_emitter.gd")
-const BAKER := preload("res://addons/materialx/mtlx_preview_baker.gd")
 
 const SPHERE_RADIUS := 0.5
 
@@ -170,16 +169,3 @@ func show_material(mtlx_path: String) -> void:
 
 func current_path() -> String:
 	return _current
-
-
-## Writes a PNG of the live preview, for the FileSystem dock thumbnail.
-func bake_current(size: int = 128) -> Error:
-	if _current == "":
-		return ERR_INVALID_PARAMETER
-	var image: Image = _viewport.get_texture().get_image()
-	if image == null:
-		return ERR_CANT_CREATE
-	DirAccess.make_dir_recursive_absolute(BAKER.CACHE_DIR)
-	if image.get_width() != size:
-		image.resize(size, size, Image.INTERPOLATE_LANCZOS)
-	return image.save_png(BAKER.cache_path(_current))

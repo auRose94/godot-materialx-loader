@@ -21,10 +21,10 @@ const PREFIX := "materialx/"
 ## directory. Empty by default: relative-to-source resolution is nearly always
 ## right, and a wrong root is worse than none.
 const TEXTURE_ROOTS := PREFIX + "texture_roots"
-## Bake GPU thumbnails automatically as materials appear or change.
-const AUTO_BAKE := PREFIX + "auto_bake_previews"
-## Edge length of a baked thumbnail, in pixels.
-const PREVIEW_SIZE := PREFIX + "preview_size"
+## Removed: the thumbnail pipeline. materialx/auto_bake_previews and
+## materialx/preview_size are dropped rather than left in place, because a setting
+## that no longer reads anything is worse than an absent one -- it looks
+## configurable and is not.
 ## Evaluate MaterialX diffuse_roughness with an Oren-Nayar lobe.
 ##
 ## On by default, because the lobe is MaterialX's own answer and Godot has no
@@ -65,11 +65,6 @@ const LEGACY_CUSTOM_LIGHTING := PREFIX + "experimental_custom_lighting"
 ## a choice this addon makes.
 const SCREEN_SPACE_REFRACTION := PREFIX + "screen_space_refraction"
 
-## Smallest useful thumbnail. Below this the bake costs the same and looks worse.
-const MIN_PREVIEW_SIZE := 32
-const MAX_PREVIEW_SIZE := 512
-
-
 ## Registers every setting with its default and a type, so it shows up in the
 ## Project Settings window with a sensible editor rather than as raw text.
 ##
@@ -83,14 +78,6 @@ static func install_defaults() -> bool:
 	var wrote := false
 	wrote = _set_if_missing(TEXTURE_ROOTS, PackedStringArray(), {
 		"type": TYPE_PACKED_STRING_ARRAY,
-	}) or wrote
-	wrote = _set_if_missing(AUTO_BAKE, true, {
-		"type": TYPE_BOOL,
-	}) or wrote
-	wrote = _set_if_missing(PREVIEW_SIZE, 128, {
-		"type": TYPE_INT,
-		"hint": PROPERTY_HINT_RANGE,
-		"hint_string": "%d,%d,8" % [MIN_PREVIEW_SIZE, MAX_PREVIEW_SIZE],
 	}) or wrote
 	# Migrated first, so the old key's value lands in the new key before
 	# _set_if_missing gives it the new default. Doing this afterwards would mean
@@ -141,17 +128,6 @@ static func texture_roots() -> PackedStringArray:
 	if v is Array:
 		return PackedStringArray(v)
 	return PackedStringArray()
-
-
-static func auto_bake() -> bool:
-	return bool(ProjectSettings.get_setting(AUTO_BAKE, true))
-
-
-static func preview_size() -> int:
-	# Clamped because the baker allocates a render target of this size, and the
-	# result is downscaled to the dock's thumbnail anyway.
-	var raw := int(ProjectSettings.get_setting(PREVIEW_SIZE, 128))
-	return clampi(raw, MIN_PREVIEW_SIZE, MAX_PREVIEW_SIZE)
 
 
 static func custom_lighting() -> bool:

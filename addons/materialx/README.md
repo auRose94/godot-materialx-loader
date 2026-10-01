@@ -27,109 +27,32 @@ The plugin is already enabled in `project.godot`. To enable it by hand:
 The dock appears on the right-hand side. It defaults to **preview only**, so
 nothing is written until you untick that.
 
-* **Convert .mtlx to .tres** — writes `<name>.tres` next to each `.mtlx`.
+* **Convert .mtlx to .tres** — writes a `ShaderMaterial` as `<name>.tres` next
+  to each `.mtlx`, ready to drop on a mesh.
   This **overwrites** any existing conversion, so point the dock at a scratch
   folder first if you want to keep the old ones to diff against.
 * **Repair texture imports** — fixes the `.import` settings of the textures the
   `.mtlx` files reference (see below).
 * **Live preview** — pick a material and see the *converted shader* rendered on a
   sphere. This is the accurate view; see below.
-* **Save live preview as thumbnail** — renders the real shader and caches it as
-  the FileSystem thumbnail for that material.
 
 ## Previews
 
-Two different mechanisms, because their accuracy differs a lot.
+One mechanism: `MtlxLivePreview` puts the converted shader on a sphere in a
+SubViewport and lets the engine render it. That is exactly what a scene shows, so
+it is the right tool for comparing against reference renders, and it is what the
+dock uses for the material you have selected.
 
-### Live preview — accurate
+There is deliberately **no FileSystem thumbnail generator.** There used to be one:
+a CPU sphere renderer as a fallback, a GPU baker that preferred the real render,
+a periodic timer, an on-disk cache and a failure backoff, all so a `.mtlx` would
+show a material ball in the FileSystem dock. It existed because the editor does
+not know what a `.mtlx` is.
 
-`MtlxLivePreview` puts the converted shader on a sphere in a SubViewport and
-lets the engine render it. That is exactly what a scene shows, so it is the
-right tool for comparing against reference renders.
-
-### FileSystem thumbnails — approximate
-
-`.mtlx` files show a shaded sphere in the FileSystem dock. This one is drawn
-**on the CPU** (`MtlxThumbnail`), because `EditorResourcePreview` generates
-previews on a worker thread (`EditorResourcePreview::_thread` → `_iterate` →
-`_generate_preview`) where a SubViewport cannot be built.
-
-The CPU sphere is fast and needs no bake, but it can only see a material whose
-base colour is a single sRGB image or a literal. Across this library:
-
-| | count |
-|---|---|
-| exactly one sRGB image — unambiguous | 232 |
-| several sRGB images — it picks one | 11 |
-| **no sRGB image at all** — colour comes from packed masks/constants | **33** |
-
-Those 33 come out as grey balls with whatever normal/roughness detail was found.
-That is a genuine limit of the heuristic rather than a bug — Granite builds its
-colour from `vector4` masks and has no colour texture at all. (Skin_* and Nickel
-*are* correct: their colour is a literal, and Nickel has no images because it is
-a pure metal.)
-
-Press **Save live preview as thumbnail** to bake the real render for one material.
-It writes `user://mtlx_previews/<name>.png`, and `MtlxPreviewGenerator` prefers
-that file over the CPU fallback whenever it exists.
-
-### Automatic baking
-
-`MtlxAutoBaker` bakes every material whose preview is missing or older than its
-`.mtlx`, one per frame, so the editor stays responsive. It runs when the plugin
-loads and re-checks every 10 seconds, which means a newly added or edited
-material is baked without any action from you. The dock's **Auto-bake
-thumbnails** checkbox turns it off.
-
-Rendering needs a real framebuffer, so the baker uses the project's default
-environment (`environment/default_environment.tres`) for image-based lighting —
-that is what makes gold and chrome look like metal in a thumbnail.
-
-### Clearing stale thumbnails
-
-Previews are cached in **two** places, and this is why a bake sometimes appears
-not to take effect:
-
-* **On disk**, in the editor cache as `resthumb-<md5>.{png,_small.png,txt}`. The
-  key is the `.mtlx`'s **MD5**, so an unchanged file keeps its old thumbnail
-  indefinitely. Deleting the project's `.godot/` does not clear it.
-* **In memory**, for the rest of the editor session. `EditorResourcePreview`
-  inserts every generated preview into its `cache` map
-  (`editor_resource_preview.cpp:170`) and checks that map *before* the disk
-  cache, so a preview already generated this session is never regenerated.
-  **There is no script API to clear it.**
-
-The plugin handles the first one itself: after each bake,
-`MtlxPreviewBaker.invalidate_preview_cache()` deletes
-`resthumb-<md5>.{png,_small.png,txt}`, so the next regeneration picks up the new
-render. This is why no manual cache-clearing is needed.
-
-The second one cannot be cleared from script. A thumbnail that was already
-generated in the current session therefore shows the old image until the editor
-restarts. The dock says so on completion rather than leaving it to be
-discovered.
-
-If you would rather clear the on-disk cache by hand:
-
-```bash
-rm -f ~/.cache/godot/resthumb-*.png ~/.cache/godot/resthumb-*.txt
-```
-
-### Rebuilding everything
-
-Two buttons under **Preview cache** in the dock:
-
-* **Rebuild all previews** — deletes every baked render and every cached
-  thumbnail, then re-bakes the whole library. Restart the editor to see the new
-  thumbnails in the FileSystem dock.
-* **Delete all previews** — deletes the renders and cached thumbnails and turns
-  **Auto-bake** off, so they are not immediately rebuilt. Useful when you want to
-  force a full, deliberate re-render.
-
-Both are the same operations the auto-baker performs, exposed for when you want
-to control the timing.
-
----
+Converting writes a `ShaderMaterial`, which the editor previews itself and
+correctly. So the pipeline was doing the same job twice -- once approximately on
+the CPU, then properly on the GPU -- to produce something the export path already
+produced for free. Until a `.mtlx` is converted it shows the generic icon.
 
 ## What changed, and why it matters
 
@@ -360,10 +283,6 @@ remainder listed rather than guessed at.
 | `mtlx_value.gd` | MaterialX typed-value decoding |
 | `mtlx_emitter.gd` | graph → `VisualShader` via `add_node` / `connect_nodes_forced` |
 | `godot_map.gd` | every verified port index, enum and conversion, with sources |
-| `mtlx_thumbnail.gd` | CPU sphere renderer for FileSystem thumbnails |
-| `mtlx_preview_generator.gd` | `EditorResourcePreviewGenerator` adapter; prefers a baked PNG |
-| `mtlx_preview_baker.gd` | GPU bake, preview-cache location and invalidation |
-| `mtlx_auto_baker.gd` | bakes every stale material, one per frame |
 | `mtlx_live_preview.gd` | GPU-rendered preview panel (real shader) |
 | `mtlx_converter.gd` | the editor dock |
 | `mtlx_texture_fixer.gd` | texture import-setting repair |
@@ -397,12 +316,7 @@ Run from the project root with `godot-mono --headless --script <file>`:
 | `tools/mtlx_specular_check.gd` | specular conversion against each file's declared IOR |
 | `tools/mtlx_corpus_check.gd` | all 277 files; dangling connections, missing textures, drops |
 | `tools/mtlx_fixer_check.gd` | import repair (dry run is side-effect free), save/load round trip |
-| `tools/mtlx_thumb_check.gd` | thumbnails render, with which maps were found and how long |
-| `tools/mtlx_thumb_sheet.gd` | contact sheet of 29 thumbnails to `user://mtlx_thumbs.png` |
 | `tools/mtlx_dock_layout_check.gd` | dock minimum size, scrollability, preview visibility |
-| `tools/mtlx_bake_check.gd` | baked-preview cache: path, staleness, colour round trip |
-| `tools/mtlx_autobake_check.gd` | auto-baker: staleness detection, real GPU bake, renders are non-flat |
-| `tools/mtlx_cache_tools_check.gd` | the dock's cache buttons: clear-all, rebuild, cache-key format |
 | `tools/mtlx_live_check.gd` | renders the live preview (needs a real GPU; see below) |
 | `tools/mtlx_check.gd` | small sample, per-material detail |
 | `tools/mtlx_trace.gd` | one material's graph + generated code (`-- res://materials/X.mtlx`) |
