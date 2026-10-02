@@ -125,6 +125,16 @@ the project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   UID-for-path callback, so an overwritten `.tres` gets a fresh `uid://` even
   though scenes may reference the old one. If you convert from a script,
   re-check the `.tres` headers or let the editor rescan.
+- **The dock's source folder is remembered, per project.** The dock re-suggested
+  a folder from a FileSystem scan on every launch, so a project whose materials
+  live anywhere but the first folder found had to retype the path each session.
+  A `materialx/materials_folder` project setting now seeds the Source folder
+  field, and the dock saves the field to it when you commit the text (Enter, or
+  focus leaving the field). Empty means auto-detect, which is all a project that
+  never touches the field ever gets — the setting exists only once you actually
+  choose. Clearing the field returns the project to auto-detect, and a saved
+  folder that no longer exists falls back to auto-detect rather than pointing
+  the dock at nothing.
 
 ## [1.3.0] — 2026-09-30
 

@@ -11,11 +11,16 @@ extends SceneTree
 ## - a project that set the old materialx/experimental_custom_lighting key must
 ##   keep its value rather than picking up the new default, or upgrading would
 ##   silently change how their materials render
+##
+## Also guards materialx/materials_folder: it must register on first use so the
+## Project Settings window shows it, and empty must read as auto-detect rather
+## than as a path.
 
 const Config := preload("res://addons/materialx/mtlx_config.gd")
 
 const NEW_KEY := "materialx/custom_lighting"
 const OLD_KEY := "materialx/experimental_custom_lighting"
+const FOLDER_KEY := "materialx/materials_folder"
 
 var _bad := 0
 var _touched := PackedStringArray()
@@ -26,6 +31,7 @@ func _init() -> void:
 	_test_default_is_on()
 	_test_old_key_true_is_kept()
 	_test_old_key_false_is_honoured()
+	_test_materials_folder()
 
 	for k in _touched:
 		ProjectSettings.set_setting(k, null)
@@ -37,7 +43,7 @@ func _init() -> void:
 
 ## A project that has never seen this setting should get the default.
 func _fresh() -> void:
-	for k in [NEW_KEY, OLD_KEY]:
+	for k in [NEW_KEY, OLD_KEY, FOLDER_KEY]:
 		if ProjectSettings.has_setting(k):
 			_touched.append(k)
 			ProjectSettings.set_setting(k, null)
@@ -94,6 +100,32 @@ func _test_old_key_false_is_honoured() -> void:
 		"and the getter agrees")
 	_expect(not ProjectSettings.has_setting(OLD_KEY),
 		"the old key is still cleaned up")
+
+
+## Empty is a meaningful value here, not a missing one: it is what auto-detect
+## looks like, so a project that never chose a folder must read as empty even
+## after the key is registered and written.
+func _test_materials_folder() -> void:
+	_fresh()
+	# The getter alone must answer correctly even before anything is written,
+	# since a project can be mid-load.
+	_expect(Config.materials_folder() == "",
+		"an unset folder reads as empty, i.e. auto-detect")
+
+	_touched.append(FOLDER_KEY)
+	Config.install_defaults()
+
+	_expect(ProjectSettings.has_setting(FOLDER_KEY),
+		"the folder key is written on first use")
+	_expect(ProjectSettings.get_property_list().any(
+		func(p): return p.name == FOLDER_KEY),
+		"the folder key is registered so it appears in Project Settings")
+	_expect(Config.materials_folder() == "",
+		"registering the key does not invent a folder")
+
+	ProjectSettings.set_setting(FOLDER_KEY, "res://materials/mtlx")
+	_expect(Config.materials_folder() == "res://materials/mtlx",
+		"the getter returns the folder the project saved")
 
 
 func _expect(cond: bool, what: String) -> bool:

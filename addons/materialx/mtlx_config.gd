@@ -64,6 +64,16 @@ const LEGACY_CUSTOM_LIGHTING := PREFIX + "experimental_custom_lighting"
 ## shadows unless the shader uses a depth prepass. That is the engine's rule, not
 ## a choice this addon makes.
 const SCREEN_SPACE_REFRACTION := PREFIX + "screen_space_refraction"
+## Where the converter dock's Source folder field starts, saved per project.
+##
+## Empty means auto-detect: the dock offers a folder the editor's FileSystem
+## actually found .mtlx files in, which is nearly always right, and a project
+## that never touches the field is never written to. The dock saves the field
+## here when the user commits it (Enter, or focus leaving it), so a project
+## whose materials live somewhere unusual reopens on that folder instead of
+## re-guessing every session. A saved folder that no longer exists falls back
+## to auto-detect rather than pointing the dock at nothing.
+const MATERIALS_FOLDER := PREFIX + "materials_folder"
 
 ## Settings the removed thumbnail pipeline read. A key that no longer reads
 ## anything is worse than an absent one -- it looks configurable and is not --
@@ -99,6 +109,10 @@ static func install_defaults() -> bool:
 	}) or wrote
 	wrote = _set_if_missing(SCREEN_SPACE_REFRACTION, false, {
 		"type": TYPE_BOOL,
+	}) or wrote
+	wrote = _set_if_missing(MATERIALS_FOLDER, "", {
+		"type": TYPE_STRING,
+		"hint": PROPERTY_HINT_DIR,
 	}) or wrote
 	_drop_dead()
 	return wrote
@@ -153,3 +167,7 @@ static func custom_lighting() -> bool:
 
 static func screen_space_refraction() -> bool:
 	return bool(ProjectSettings.get_setting(SCREEN_SPACE_REFRACTION, false))
+
+
+static func materials_folder() -> String:
+	return str(ProjectSettings.get_setting(MATERIALS_FOLDER, ""))

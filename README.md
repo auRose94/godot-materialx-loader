@@ -53,6 +53,7 @@ All optional; the defaults work with no configuration.
 | `materialx/texture_roots` | `[]` | Extra directories to search for textures, tried before the `.mtlx`'s own directory. Leave empty for relative-to-source resolution. |
 | `materialx/custom_lighting` | `true` | Evaluate `diffuse_roughness` with an Oren-Nayar lobe — and `sheen` with MaterialX's actual sheen lobe — inside a custom light function. On by default because those lobes are MaterialX's own answer and Godot has no equivalent; turning it off falls back to Godot's Lambert and rim. See [Oren-Nayar diffuse](#oren-nayar-diffuse) for what this costs. |
 | `materialx/screen_space_refraction` | `false` | Render `transmission` as real refraction of the scene behind the surface, instead of fading it out with `ALPHA`. The surface joins the transparent pass, dims itself by the amount of background it shows, and the displaced sample is masked against the depth buffer. Tunables per material: `refraction_strength` (offset size) and `refraction_softness` (mask blend width). |
+| `materialx/materials_folder` | `""` | The folder the dock's Source folder field starts on. Empty auto-detects a folder holding `.mtlx` files; the dock saves the field here when you commit it (Enter, or clicking elsewhere), so the next session reopens on your choice. Clearing the field returns to auto-detect. |
 
 Materials with a non-zero `diffuse_roughness` have Godot's whole lighting model
 replaced in the light stage, so for those the addon, not the engine, is
@@ -69,6 +70,10 @@ are dropped from `project.godot` on first load.
 
 The dock appears on the right-hand side of the editor. It defaults to
 **preview only**, so nothing is written until you ask for it.
+
+The **Source folder** both buttons work from is remembered per project: the
+field starts on the saved choice (or auto-detect), and committing an edit —
+Enter, or clicking elsewhere — saves it, so the dock reopens where you left it.
 
 - **Convert .mtlx to .tres** — batch-convert a folder. This is the path to use
   for an exported build (see below).

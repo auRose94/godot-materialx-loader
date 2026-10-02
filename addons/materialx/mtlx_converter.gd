@@ -62,12 +62,13 @@ func _ready() -> void:
 	folder_label.text = "Source folder"
 	body.add_child(folder_label)
 
-	# Offer whatever folder the plugin actually found materials in, rather than a
-	# fixed name that means nothing in another project.
-	var suggested: String = _suggest_folder()
 	_folder = LineEdit.new()
-	_folder.text = suggested
-	_folder.placeholder_text = suggested
+	# Committed edits are saved to project settings, so the dock reopens where
+	# the user left it rather than re-guessing every session (see
+	# _on_folder_committed). What the field starts as is decided by
+	# _populate_folder below.
+	_folder.text_submitted.connect(_on_folder_committed)
+	_folder.focus_exited.connect(_on_folder_committed)
 	body.add_child(_folder)
 
 	# Dry run by default: writing 276 files is easy to do by accident.
@@ -179,7 +180,38 @@ func _on_custom_lighting_toggled(on: bool) -> void:
 
 
 func _populate_folder() -> void:
-	_folder.text = _suggest_folder()
+	var saved := Config.materials_folder().strip_edges()
+	var dir := saved
+	# An unset folder auto-detects; a saved one wins unless it has stopped
+	# existing, which is better than pointing the dock at nothing.
+	if saved.is_empty() or DirAccess.open(saved) == null:
+		dir = _suggest_folder()
+	_folder.text = dir
+	_folder.placeholder_text = dir
+
+
+## Saves the source folder to project settings when the user commits the field,
+## so the dock reopens on it next session. Fires on Enter and on focus leaving
+## the field -- which covers clicking Convert straight after typing, since the
+## button takes focus.
+##
+## Writes nothing when the value is unchanged, so building the dock and tearing
+## it down never touch project.godot. Clearing the field returns the project to
+## auto-detect, which is what empty means.
+##
+## Accepts an optional argument because text_submitted carries the field's text
+## and focus_exited carries nothing; both arrive here for the same decision.
+func _on_folder_committed(_text: String = "") -> void:
+	var v := _folder.text.strip_edges()
+	# Trailing slashes are noise; a bare scheme such as res:// is not.
+	while v.ends_with("/") and not v.ends_with("://"):
+		v = v.left(v.length() - 1)
+	if v == Config.materials_folder().strip_edges():
+		return
+	ProjectSettings.set_setting(Config.MATERIALS_FOLDER, v)
+	ProjectSettings.save()
+	# The live picker lists the .mtlx files of this folder, so follow it.
+	_populate_live_picker()
 
 
 ## The folder to offer in the source field.

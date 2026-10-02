@@ -36,6 +36,10 @@ nothing is written until you untick that.
 * **Live preview** — pick a material and see the *converted shader* rendered on a
   sphere. This is the accurate view; see below.
 
+The Source folder is remembered per project
+(`Project Settings → materialx/materials_folder`): the dock reopens on the last
+committed value, and an empty field means auto-detect again.
+
 ## Previews
 
 One mechanism: `MtlxLivePreview` puts the converted shader on a sphere in a
