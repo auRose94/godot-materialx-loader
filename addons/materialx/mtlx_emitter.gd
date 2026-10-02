@@ -54,7 +54,8 @@ class Result extends RefCounted:
 var _doc: MtlxDocument
 var _shader: VisualShader
 var _next_id := FIRST_NODE_ID
-var _cache: Dictionary = {}  # MtlxElement -> Ref2
+var _cache: Dictionary = {}  # MtlxElement -> Ref2, fragment stage
+var _cache_light: Dictionary = {}  # MtlxElement -> Ref2, light stage
 var _notes: PackedStringArray = []
 var _dropped: Dictionary = {}
 var _missing_textures: PackedStringArray = []
@@ -62,6 +63,45 @@ var _missing_textures: PackedStringArray = []
 var _base_dir: String = "res://"
 ## Where textures are found, tried in order.
 var _texture_roots: PackedStringArray = []
+
+## Which stage the next _add() lands in. The emitter is fragment-first; the
+## custom light node and the screen-refraction chain need to place nodes in the
+## light stage, and re-emitting a MaterialX sub-graph there needs the whole
+## emission machinery to follow. Set _stage, emit, restore.
+var _stage: int = FRAGMENT
+## Node id -> the stage it was added to. get_node()/connect_nodes() are
+## stage-indexed, so every id has to be rememberable.
+var _node_stage: Dictionary = {}
+## Shader parameter name -> the stage whose parameter node owns the uniform
+## declaration. A parameter needed by both stages (the folded `specular` is the
+## standing example) is declared by its owner and referenced everywhere else
+## through a ParameterRef, because two Parameter nodes with one name would
+## emit `uniform float x` twice and fail to compile.
+var _param_owners: Dictionary = {}
+
+## Screen-space refraction state, filled by _plan_screen_refraction and spent
+## by the base fold and _wire_screen_refraction.
+var _refraction_surface_w: Ref2 = null  # how much of the lit surface survives
+var _refraction_background_w: Ref2 = null  # how much background replaces it
+var _refraction_transmission: Ref2 = null  # the transmission weight itself
+## The graph that drives the ROUGHNESS port, for the refraction blur. There is
+## no fragment *input* named "roughness" -- the built-in is write-only -- so the
+## only way to the same value is the fold that produced it.
+var _roughness_ref: Ref2 = null
+## The emission chain built by the emission fold, so the refracted background
+## can be ADDED to it instead of replacing it.
+var _emission_ref: Ref2 = null
+## Surface inputs consumed by a feature path (refraction, the light node's
+## sheen) rather than dropped. Reported as dropped only when the feature path
+## did not actually take them.
+var _consumed_by_features: Dictionary = {}
+## True when the Oren-Nayar light node took over the material.
+var _custom_light_wired: bool = false
+## True when the sheen lobe went to the light node rather than Godot's RIM.
+var _sheen_wired_light: bool = false
+## The brightest-channel collapse of specular_color, shared by the fragment
+## fold and the light-stage fold so its note is emitted once.
+var _specular_col_scale: float = 1.0
 
 
 static func build_file(path: String, texture_roots: PackedStringArray = PackedStringArray()) -> Result:
@@ -126,23 +166,32 @@ func _emit_surface(surface: MtlxDocument.MtlxElement) -> void:
 	# base/base_color and emission/emission_color each pair a scalar weight
 	# with a colour, and both have to land on one port, so each pair is folded
 	# through a multiply.
-	_fold_into_output(surface, ["base", "base_color"], GodotMap.OUT_ALBEDO, Vector3.ONE, "base")
+	#
+	# Ordering matters twice here:
+	# * the refraction state decides both whether `transmission` stays with
+	#   _fold_opacity and by how much ALBEDO is dimmed, so it is computed
+	#   before the base fold;
+	# * the custom-lighting decision decides whether `sheen` goes to Godot's
+	#   RIM (fragment) or to the light node (light stage), so it runs before
+	#   the sheen fold.
+	var refracted: bool = _plan_screen_refraction(surface)
+	_fold_into_output(surface, ["base", "base_color"], GodotMap.OUT_ALBEDO, Vector3.ONE, "base", _refraction_surface_w)
 	_fold_into_output(surface, ["emission", "emission_color"], GodotMap.OUT_EMISSION, Vector3.ZERO, "emission")
 	_fold_specular(surface)
 	_fold_anisotropy_flow(surface)
-	# Refraction claims `transmission` when it is enabled, so _fold_opacity
-	# must be told whether it is still responsible for it.
-	var refracted: bool = _try_screen_refraction(surface)
-	_fold_opacity(surface, not refracted)
-	_fold_sheen_color(surface)
 	_fold_subsurface(surface)
-	_try_custom_lighting(surface)
+	var custom_lit: bool = _try_custom_lighting(surface)
+	_fold_sheen(surface, custom_lit)
+	if refracted:
+		_wire_screen_refraction(surface)
+	else:
+		_fold_opacity(surface)
 
 	# Inputs handled by the folds above rather than by the direct port loop.
 	const FOLDED_INPUTS := [
 		"base", "base_color", "emission", "emission_color",
 		"specular", "specular_IOR", "specular_color",
-		"specular_rotation", "opacity", "transmission", "sheen_color",
+		"specular_rotation", "opacity", "transmission", "sheen", "sheen_color",
 		"transmission_color", "transmission_depth", "ior",
 		"subsurface",
 	]
@@ -157,6 +206,10 @@ func _emit_surface(surface: MtlxDocument.MtlxElement) -> void:
 		var src: Ref2 = _emit_input(inp, surface.graph)
 		if not src.is_valid():
 			continue
+		if port == GodotMap.OUT_ROUGHNESS:
+			# Remembered for the refraction blur, which needs the material's
+			# roughness but has no fragment input to read it from.
+			_roughness_ref = src
 		_connect_output(src, port)
 
 	# Report only the unmapped inputs the file actually asked for. Anything
@@ -166,6 +219,8 @@ func _emit_surface(surface: MtlxDocument.MtlxElement) -> void:
 		var name: String = key
 		if GodotMap.SURFACE_PORTS.has(name):
 			continue
+		if _consumed_by_features.has(name):
+			continue  # a feature path took it; reporting it as dropped would lie
 		var inp: MtlxDocument.MtlxInput = surface.inputs[name]
 		if not _is_worth_reporting(name, inp):
 			continue
@@ -203,7 +258,7 @@ func _is_geometry_placeholder(inp: MtlxDocument.MtlxInput) -> bool:
 	return true
 
 
-func _fold_into_output(surface: MtlxDocument.MtlxElement, names: Array, out_port: int, neutral: Vector3, param_base: String) -> void:
+func _fold_into_output(surface: MtlxDocument.MtlxElement, names: Array, out_port: int, neutral: Vector3, param_base: String, dim: Ref2 = null) -> void:
 	# a * b, where each factor is either a scalar weight, a colour, or absent.
 	var mul_id: int = _add(VisualShaderNodeVectorOp.new())
 	var mul: VisualShaderNodeVectorOp = _node(mul_id)
@@ -226,12 +281,24 @@ func _fold_into_output(surface: MtlxDocument.MtlxElement, names: Array, out_port
 		idx += 1
 		wired = true
 
+	var out_ref := Ref2.new(mul_id, 0)
 	if not wired:
 		# Nothing but the neutral value; drop the node.
 		_shader.remove_node(FRAGMENT, mul_id)
 		_next_id -= 1
+		if dim == null or not dim.is_valid():
+			return
+		# Only the dim remains: a scalar splatted onto the port.
+		_connect_output(dim, out_port)
 		return
-	_connect_output(Ref2.new(mul_id, 0), out_port)
+	if dim != null and dim.is_valid():
+		# Screen-space refraction dims the surface so the background sample
+		# replaces rather than stacks on top of it (the engine does the same:
+		# `ALBEDO *= 1.0 - ref_amount` in material.cpp).
+		out_ref = _vop(GodotMap.VOP_MUL, out_ref, dim)
+	if out_port == GodotMap.OUT_EMISSION:
+		_emission_ref = out_ref
+	_connect_output(out_ref, out_port)
 
 
 ## MaterialX's physical-IOR specular into Godot's artistic SPECULAR port.
@@ -253,8 +320,11 @@ func _fold_specular(surface: MtlxDocument.MtlxElement) -> void:
 	var spec_in: MtlxDocument.MtlxInput = surface.input("specular")
 	var col_in: MtlxDocument.MtlxInput = surface.input("specular_color")
 
-	var col_scale: float = _specular_color_scale(col_in)
-	var f0: Variant = _specular_f0_chain(ior_in, spec_in, col_scale)
+	# Computed once and reused by the light-stage fold (if the custom lighting
+	# takes the material), so the "collapsed to a scalar" note is not appended
+	# twice.
+	_specular_col_scale = _specular_color_scale(col_in)
+	var f0: Variant = _specular_f0_chain(ior_in, spec_in, _specular_col_scale)
 
 	# All-literal: the whole chain is a constant, so emit it as one adjustable
 	# parameter rather than a cloud of arithmetic nodes.
@@ -264,6 +334,9 @@ func _fold_specular(surface: MtlxDocument.MtlxElement) -> void:
 		p.parameter_name = "specular"
 		p.default_value_enabled = true
 		p.default_value = sqrt(maxf(float(f0), 0.0) / GodotMap.GODOT_DIELECTRIC_SCALE)
+		# This node owns the uniform declaration; a light-stage copy of it
+		# (which the Oren-Nayar node reads) must come through a ParameterRef.
+		_param_owners["specular"] = FRAGMENT
 		_connect_output(Ref2.new(pid, 0), GodotMap.OUT_SPECULAR)
 		return
 
@@ -427,28 +500,83 @@ const SSS_STRENGTH_MAX := 1.0
 ## supplies the vector math, since a VisualShader cannot call the language's
 ## refract() directly -- three inputs (incident, normal, eta), one output.
 ##
-## The result goes to EMISSION rather than ALPHA. That keeps the material in the
-## opaque pass, which matters: a material that reads the screen counts as
-## alpha-bearing to the renderer (scene_shader_forward_clustered.cpp:255) and
-## then only casts shadows with a depth prepass. Writing ALPHA instead would
-## walk straight into that, and into the sorting problems of a blended shell.
+## ## The black-hole bug, and what the engine's own refraction taught
 ##
-## Two approximations, both deliberate and both documented:
+## An earlier version kept the material opaque and wrote the refracted sample to
+## EMISSION. A material that reads the screen but writes no ALPHA stays in the
+## opaque pass -- and the renderer copies the screen texture AFTER that pass
+## (render_forward_clustered.cpp:2366). During the draw, the sampler therefore
+## still holds the previous frame's copy, which contains the object itself.
+## Every frame the surface re-absorbed an image of itself: sky leaked inward
+## from the silhouette and compounded, while the centre kept re-sampling its own
+## dark body. On a glass canopy the result is a black disc with a glowing ring
+## -- a black hole with an accretion disk.
 ##
-## * The refracted vector is in view space, and SCREEN_UV is in screen space.
-##   Only the xy of the refracted direction is used, scaled by a parameter, which
-##   drifts at grazing angles. A true projection needs the screen-space normal and
-##   the viewport scale, which are not reachable as a single node value.
-## * The sample is not masked against the depth buffer, so near a silhouette it
-##   can pull in background from behind the object. SOURCE_DEPTH would fix that
-##   at the cost of a second sampler and a wider node graph.
-func _try_screen_refraction(surface: MtlxDocument.MtlxElement) -> bool:
+## Godot's own BaseMaterial3D refraction cannot do this, and its generated code
+## (material.cpp, FEATURE_REFRACTION) is the recipe followed here:
+##
+## * `ALPHA = 1.0` is written unconditionally -- the engine's comment is
+##   "Force transparency on the material (required for refraction)". Writing
+##   ALPHA moves the material to the transparent pass, which renders AFTER the
+##   screen copy, so the copy no longer contains the object. No feedback.
+## * The surface dims by the same amount the background shows
+##   (`ALBEDO *= 1.0 - ref_amount`), and the sample is ADDED to EMISSION.
+##   Stacking a fully lit surface and a full background sample is what blew the
+##   silhouette out into a halo.
+## * The sample UV is masked against the depth buffer, blended so a foreground
+##   object crossing the displaced sample does not pop in as "background". The
+##   engine reconstructs view-space Z through INV_PROJECTION_MATRIX; here the
+##   same decision is made by comparing raw window depths, which needs no
+##   matrix nodes: the depth texture's .r and FRAGCOORD.z are the same
+##   quantity, so "the sampled point is behind me" is exactly
+##   `depth_offset > z_frag` either way. The blend window is a tunable
+##   parameter rather than the engine's fixed 1 view-metre.
+## * The screen sample is blurred by roughness (textureLod, ROUGHNESS * 8) --
+##   frosted glass, engine parity, wired through the texture node's lod port.
+##
+## One approximation remains, and it is the engine's own: the displaced sample
+## follows the view-space ray without reprojecting through the frustum. The
+## direction is divided by -z (a perspective slope, which the engine's
+## `SCREEN_UV - ref_normal.xy * ...` does not even do), so the offset survives
+## grazing angles; the magnitude still ignores the focal length and is tuned by
+## the `refraction_strength` parameter. Transparent objects behind the glass are
+## not in the screen copy, so they do not show through it -- engine parity too.
+func _plan_screen_refraction(surface: MtlxDocument.MtlxElement) -> bool:
 	if not Config.screen_space_refraction():
 		return false
 
 	var transmission: Ref2 = _transmission_ref(surface)
 	if not transmission.is_valid():
 		return false
+
+	# The transmission and opacity weights decide how the surface and the
+	# background are weighted against each other. MaterialX's opacity blends the
+	# whole response toward the transmission background, the same shape the
+	# engine reaches with `ref_amount = 1.0 - albedo.a`:
+	#   background_w = 1 - opacity * (1 - transmission)
+	#   surface_w    = 1 - background_w
+	var background_w: Ref2 = transmission
+	var opacity: Ref2 = _opacity_ref(surface)
+	if opacity.is_valid():
+		var one_minus_t: Ref2 = _fop(GodotMap.FOP_SUB, 1.0, transmission)
+		var kept: Ref2 = _fop(GodotMap.FOP_MUL, opacity, one_minus_t)
+		background_w = _fop(GodotMap.FOP_SUB, 1.0, kept)
+	_consumed_by_features["transmission"] = true
+	_consumed_by_features["transmission_color"] = true
+	_consumed_by_features["opacity"] = true
+	_refraction_transmission = transmission
+	_refraction_background_w = background_w
+	_refraction_surface_w = _fop(GodotMap.FOP_SUB, 1.0, background_w)
+	return true
+
+
+## Builds the fragment graph for a planned refraction. Split from
+## _plan_screen_refraction because the background sample has to be ADDED to
+## whatever the emission fold produced, and that fold runs later.
+func _wire_screen_refraction(surface: MtlxDocument.MtlxElement) -> void:
+	# Planned earlier; re-deriving it here would emit a second `transmission`
+	# uniform (literal parameters are not cached, only element links are).
+	var transmission: Ref2 = _refraction_transmission
 
 	# Godot refracts about N with the incident vector pointing into the surface,
 	# which is the negated view vector.
@@ -483,7 +611,23 @@ func _try_screen_refraction(surface: MtlxDocument.MtlxElement) -> bool:
 	else:
 		refr.set_default_input_values([2, 1.0 / 1.5])
 
-	# offset = refract_dir.xy * refraction_strength, exposed so the strength can be
+	# Perspective slope: the refracted ray's xy per unit of travel away from the
+	# camera, which is what the screen-space displacement of the background
+	# actually follows. Dividing by -z keeps grazing angles from collapsing the
+	# offset; max() guards the divide itself.
+	var parts: int = _add(VisualShaderNodeVectorDecompose.new())
+	_node(parts).op_type = VisualShaderNodeVectorBase.OP_TYPE_VECTOR_3D
+	_connect(Ref2.new(refr_id, 0), 0, parts, 0)
+	var neg_z: Ref2 = _fop(GodotMap.FOP_MUL, Ref2.new(parts, 2), -1.0)
+	var safe_z: Ref2 = _fop(GodotMap.FOP_MAX, neg_z, 1e-4)
+	var slope_x: Ref2 = _fop(GodotMap.FOP_DIV, Ref2.new(parts, 0), safe_z)
+	var slope_y: Ref2 = _fop(GodotMap.FOP_DIV, Ref2.new(parts, 1), safe_z)
+	var compose: int = _add(VisualShaderNodeVectorCompose.new())
+	_node(compose).op_type = VisualShaderNodeVectorBase.OP_TYPE_VECTOR_2D
+	_connect(slope_x, 0, compose, 0)
+	_connect(slope_y, 0, compose, 1)
+
+	# offset = slope * refraction_strength, exposed so the strength can be
 	# tuned per material without rebuilding.
 	var strength := VisualShaderNodeFloatParameter.new()
 	strength.parameter_name = _safe_param_name("refraction_strength")
@@ -491,22 +635,11 @@ func _try_screen_refraction(surface: MtlxDocument.MtlxElement) -> bool:
 	strength.default_value = REFRACTION_STRENGTH
 	var strength_id: int = _add(strength)
 
-	# SCREEN_UV is a vec2, so the refracted direction is truncated to its xy by
-	# running the VectorOp in 2D mode. A VectorCompose node would be the obvious
-	# choice and is wrong: it takes one vector and splits it into components, not
-	# the other way round.
-	var xy := VisualShaderNodeVectorOp.new()
-	xy.set("operator", GodotMap.VOP_ADD)
-	xy.set("op_type", VisualShaderNodeVectorOp.OP_TYPE_VECTOR_2D)
-	var xy_id: int = _add(xy)
-	_connect(Ref2.new(refr_id, 0), 0, xy_id, 0)
-	xy.set_default_input_values([1, Vector2.ZERO])
-
 	var scaled := VisualShaderNodeVectorOp.new()
 	scaled.set("operator", GodotMap.VOP_MUL)
 	scaled.set("op_type", VisualShaderNodeVectorOp.OP_TYPE_VECTOR_2D)
 	var scaled_id: int = _add(scaled)
-	_connect(Ref2.new(xy_id, 0), 0, scaled_id, 0)
+	_connect(Ref2.new(compose, 0), 0, scaled_id, 0)
 	_connect(Ref2.new(strength_id, 0), 0, scaled_id, 1)
 
 	var screen_uv := _add_input("screen_uv")
@@ -517,13 +650,72 @@ func _try_screen_refraction(surface: MtlxDocument.MtlxElement) -> bool:
 	_connect(Ref2.new(screen_uv, 0), 0, offset_id, 0)
 	_connect(Ref2.new(scaled_id, 0), 0, offset_id, 1)
 
+	# Depth mask: fall back to the undisplaced SCREEN_UV wherever the displaced
+	# sample does not land behind the fragment -- a foreground object crossing
+	# the sample must not read as background. Both depths are raw window depth,
+	# so the comparison needs no projection matrices; the blend window is a
+	# parameter because one raw-depth unit spans very different view distances
+	# near and far.
+	var depth := VisualShaderNodeTexture.new()
+	depth.source = VisualShaderNodeTexture.SOURCE_DEPTH
+	var depth_id: int = _add(depth)
+	_connect(Ref2.new(offset_id, 0), 0, depth_id, 0)
+	depth._set_output_ports_expanded(PackedInt32Array([0]))
+
+	var fragcoord := _add_input("fragcoord")
+	var frag_parts: int = _add(VisualShaderNodeVectorDecompose.new())
+	_node(frag_parts).op_type = VisualShaderNodeVectorBase.OP_TYPE_VECTOR_4D
+	_connect(Ref2.new(fragcoord, 0), 0, frag_parts, 0)
+
+	# Behind-me test in raw window depth. Godot 4.3+ uses a REVERSED-Z depth
+	# buffer in every renderer -- the opaque pass clears depth to 0.0
+	# (render_forward_clustered.cpp:2903) and Compatibility sets glDepthFunc to
+	# GL_GEQUAL (rasterizer_scene_gles3.cpp:2873) -- so "farther than me" is a
+	# SMALLER value, and the delta is fragment depth minus sample depth. Get
+	# this backwards and the mask closes everywhere; the glass renders its
+	# undisplaced background and the strength knob does nothing.
+	var depth_delta: Ref2 = _fop(GodotMap.FOP_SUB, Ref2.new(frag_parts, 2), Ref2.new(depth_id, 1))
+
+	var softness := VisualShaderNodeFloatParameter.new()
+	softness.parameter_name = _safe_param_name("refraction_softness")
+	softness.default_value_enabled = true
+	softness.default_value = REFRACTION_SOFTNESS
+	var softness_id: int = _add(softness)
+
+	var windowed: Ref2 = _fop(GodotMap.FOP_DIV, depth_delta, Ref2.new(softness_id, 0))
+	var mask: int = _add(VisualShaderNodeClamp.new())
+	_node(mask).set_default_input_values([1, 0.0, 2, 1.0])
+	_connect(windowed, windowed.port, mask, 0)
+
+	var mix_uv: int = _add(VisualShaderNodeMix.new())
+	_node(mix_uv).op_type = GodotMap.MIX_VECTOR_2D_SCALAR
+	_connect(Ref2.new(screen_uv, 0), 0, mix_uv, 0)
+	_connect(Ref2.new(offset_id, 0), 0, mix_uv, 1)
+	_connect(Ref2.new(mask, 0), 0, mix_uv, 2)
+
+	# The screen sample is blurred by roughness, engine parity
+	# (`textureLod(screen_texture, uv, ROUGHNESS * 8.0)` in material.cpp).
 	var screen := VisualShaderNodeTexture.new()
 	screen.source = VisualShaderNodeTexture.SOURCE_SCREEN
 	var screen_id: int = _add(screen)
-	_connect(Ref2.new(offset_id, 0), 0, screen_id, 0)
+	_connect(Ref2.new(mix_uv, 0), 0, screen_id, 0)
+	if _roughness_ref != null and _roughness_ref.is_valid():
+		# Frosted glass, engine parity: the engine samples with
+		# textureLod(screen_texture, uv, ROUGHNESS * 8.0). Without a roughness
+		# fold to read, the lod stays 0 -- a plain sample is the safe default.
+		var blur: Ref2 = _fop(GodotMap.FOP_MUL, _roughness_ref, 8.0)
+		_connect(blur, blur.port, screen_id, 1)
 
-	# EMISSION = sampled.rgb * transmission, optionally tinted by transmission_color.
+	# EMISSION += sampled.rgb * background_w * transmission_color * EXPOSURE.
+	#
+	# The engine multiplies by EXPOSURE because every other term the fragment
+	# adds has the scene's exposure normalisation baked in, and the screen
+	# sample reaches around it (scene_shader_forward_clustered.cpp maps
+	# EXPOSURE to 1.0 / emissive_exposure_normalization).
 	var gain: Ref2 = transmission
+	var exposure := _add_input("exposure")
+	gain = _fop(GodotMap.FOP_MUL, gain, Ref2.new(exposure, 0))
+	gain = _fop(GodotMap.FOP_MUL, gain, _refraction_background_w)
 	var tint: MtlxDocument.MtlxInput = surface.input("transmission_color")
 	if tint != null:
 		var tint_ref: Ref2 = _emit_input(tint, surface.graph)
@@ -532,18 +724,33 @@ func _try_screen_refraction(surface: MtlxDocument.MtlxElement) -> bool:
 	# The screen sample is a vec4 and the gain a scalar or colour, so the
 	# multiply stays in 3D mode: Godot coerces the alpha away with it.
 	var lit: Ref2 = _vop(GodotMap.VOP_MUL, Ref2.new(screen_id, 0), gain)
+	if _emission_ref != null and _emission_ref.is_valid():
+		lit = _vop(GodotMap.VOP_ADD, _emission_ref, lit)
 
 	_connect_output(lit, GodotMap.OUT_EMISSION)
 
+	# ALPHA = 1.0, written unconditionally: it is what moves the material into
+	# the transparent pass, after the screen copy. See _plan_screen_refraction.
+	var opaque := VisualShaderNodeFloatConstant.new()
+	opaque.constant = 1.0
+	_connect_output(Ref2.new(_add(opaque), 0), GodotMap.OUT_ALPHA)
+
 	_notes.append(
-		"transmission rendered as screen-space refraction; the surface stays "
-		+ "opaque and samples what is behind it")
-	return true
+		"transmission rendered as screen-space refraction; the surface joins "
+		+ "the transparent pass (and so no longer casts shadows without a "
+		+ "depth prepass), dimmed by the amount of background it shows")
 
 
-## Default strength of the screen-space offset, in SCREEN_UV units. Small on
-## purpose: it is a displacement of the background sample, not a lens.
+## Default strength of the screen-space offset, in SCREEN_UV units per unit of
+## ray slope. Small on purpose: it is a displacement of the background sample,
+## not a lens.
 const REFRACTION_STRENGTH := 0.02
+
+## Width of the depth-mask blend, in raw window-depth units. The engine blends
+## over a fixed view-space metre, which raw depth cannot express as one
+## constant; this is small enough to read as a mask rather than a gradient and
+## is exposed as the `refraction_softness` parameter.
+const REFRACTION_SOFTNESS := 0.002
 
 
 ## Adds a fragment-stage input node reading one of the shader's built-ins.
@@ -646,16 +853,19 @@ func _fold_opacity(surface: MtlxDocument.MtlxElement, include_transmission: bool
 
 
 ## Experimental: replace Godot's lighting with a copy that understands MaterialX's
-## diffuse_roughness.
+## diffuse_roughness -- and, since 1.2, MaterialX's actual sheen lobe.
 ##
 ## Writing anything to the light stage sets LIGHT_CODE_USED, which makes Godot
 ## skip its entire lighting model (scene_forward_lights_inc.glsl:121). That is why
-## this is gated so narrowly -- it is only worth doing for a material that has
+## this is gated narrowly -- it is only worth doing for a material that has
 ## diffuse_roughness set and nothing this cannot reproduce.
 ##
-## Returns true when the material was taken over. Callers use that to stop
-## reporting diffuse_roughness as dropped.
+## Returns true when the material was taken over. Callers use that to route
+## sheen to the light node instead of Godot's RIM, and to stop reporting
+## diffuse_roughness as dropped.
 func _try_custom_lighting(surface: MtlxDocument.MtlxElement) -> bool:
+	_custom_light_wired = false
+	_sheen_wired_light = false
 	if not Config.custom_lighting():
 		return false
 
@@ -668,10 +878,10 @@ func _try_custom_lighting(surface: MtlxDocument.MtlxElement) -> bool:
 		if v == null or GodotMap.is_default("diffuse_roughness", float(v)):
 			return false
 
-	# Anything whose lobes this node cannot reproduce. Clearcoat, rim and
-	# anisotropy are not readable from a light function at all -- the built-in
-	# list in shader_types.cpp does not contain them. Taking such a material
-	# would silently drop those lobes.
+	# Anything whose lobes this node cannot reproduce. Clearcoat and anisotropy
+	# are not readable from a light function at all -- the built-in list in
+	# shader_types.cpp does not contain them. Taking such a material would
+	# silently drop those lobes.
 	#
 	# Tested on the enabling input, not on the parameters. coat_roughness is
 	# 0.1 in 253 of the 277 files here against a MaterialX default of 0.03, so
@@ -705,7 +915,29 @@ func _try_custom_lighting(surface: MtlxDocument.MtlxElement) -> bool:
 	# The check that found this -- mtlx_light_path_check -- used to treat any
 	# darkening as a failure, which is only true for sigma 0. It now asserts the
 	# invariant that actually holds: at sigma 0 the custom path matches Godot.
-	for enabling in ["coat", "sheen"]:
+	#
+	# Sheen is admitted where the node can carry it: the node transcribes
+	# MaterialX's Imageworks sheen (mx_microfacet_sheen.glsl), fed by uniforms or
+	# light-stage nodes. A sheen whose weight/roughness/colour depend on a node
+	# the light stage cannot host is refused whole, never half-rendered.
+	var sheen_inp: MtlxDocument.MtlxInput = surface.input("sheen")
+	var sheen_enabled: bool = _enabled(surface, "sheen")
+	if sheen_enabled:
+		var sheen_parts := {
+			"sheen": sheen_inp,
+			"sheen_roughness": surface.input("sheen_roughness"),
+			"sheen_color": surface.input("sheen_color"),
+		}
+		for k in sheen_parts.keys():
+			var part: MtlxDocument.MtlxInput = sheen_parts[k]
+			if part == null:
+				continue  # absent inputs fall back to the node's port defaults
+			var part_graph: String = surface.graph
+			if not part.is_link():
+				continue  # a literal becomes a uniform, always representable
+			if not _light_representable(part, part_graph):
+				return false
+	for enabling in ["coat"]:
 		if _enabled(surface, enabling):
 			return false
 	# Anisotropy has no strength input; any non-zero rotation or anisotropy
@@ -738,6 +970,33 @@ func _try_custom_lighting(surface: MtlxDocument.MtlxElement) -> bool:
 	var light_id: int = _add_light(light)
 	_connect_light(Ref2.new(sigma_id, 0), 0, light_id, 0)
 
+	# The material's SPECULAR port value drives the dielectric F0, exactly as
+	# F0(metallic, specular, albedo) does for the engine's own path
+	# (scene_forward_clustered.glsl:2236). A light function has no built-in for
+	# that port -- SPECULAR_AMOUNT is the *light's* specular, not the
+	# material's -- so the folded value reaches the node through the shared
+	# uniform (or, for a graph-driven specular, through the same chain re-emitted
+	# in this stage). Port 1 must always be wired: an unconnected custom-node
+	# input compiles to an empty string (see _wire_sheen_to_light).
+	var spec_ref: Ref2 = _specular_port_in_light(surface)
+	if not spec_ref.is_valid():
+		spec_ref = Ref2.new(_add_light(_constant_for("float", 0.5)), 0)
+	_connect_light(spec_ref, 0, light_id, 1)
+
+	if sheen_enabled:
+		if not _wire_sheen_to_light(surface, light_id):
+			# The gate vetted the sheen inputs, so this should not be
+			# reachable; if a driver changes and it is, the light node must go
+			# too -- leaving it half-wired ships a shader that does not compile.
+			_teardown_light_stage()
+			return false
+		_sheen_wired_light = true
+		_consumed_by_features["sheen_roughness"] = true
+	else:
+		# Ports 2-4 still have to be wired: an unconnected custom-node input
+		# reaches _get_code as an empty string and the GLSL fails to compile.
+		_wire_sheen_defaults_to_light(light_id)
+
 	# The light node's two outputs go to the light stage's own output ports:
 	# DIFFUSE_LIGHT = 0, SPECULAR_LIGHT = 1.
 	_connect_light(Ref2.new(light_id, 0), 0, OUTPUT_NODE, 0)
@@ -746,10 +1005,217 @@ func _try_custom_lighting(surface: MtlxDocument.MtlxElement) -> bool:
 	# specular lobe is lost.
 	_connect_light(Ref2.new(light_id, 1), 1, OUTPUT_NODE, 1)
 
-	_notes.append(
-		"diffuse_roughness evaluated with an Oren-Nayar lobe; this replaces "
-		+ "Godot's lighting for this material")
+	# Post-build self-check: every input of the custom node has to be wired.
+	# An unconnected custom-node input reaches _get_code as an empty string --
+	# "max(, 0.0)" -- and the shader fails to compile, all of it, not just the
+	# broken lobe. Guarded against rather than trusted: a version of this addon
+	# left running across an addon update (the editor caches scripts) once
+	# saved 22 broken .tres this way, and the mech scene rendered the sky
+	# through them as glowing white blotches. The check runs on the final
+	# wiring, because nothing after it touches the light stage; on failure the
+	# node and its stage are torn down and the material falls back to Godot's
+	# own lighting with a note.
+	if not _light_stage_self_check(light_id):
+		_teardown_light_stage()
+		_custom_light_wired = false
+		_sheen_wired_light = false
+		_consumed_by_features.erase("diffuse_roughness")
+		_consumed_by_features.erase("sheen_roughness")
+		_notes.append("custom light node had an unwired input after wiring; "
+			+ "fell back to Godot's own lighting -- please report this")
+		return false
+
+	_custom_light_wired = true
+	_consumed_by_features["diffuse_roughness"] = true
+	if sheen_enabled:
+		_notes.append(
+			"diffuse_roughness and sheen evaluated with MaterialX lobes; this "
+			+ "replaces Godot's lighting for this material")
+	else:
+		_notes.append(
+			"diffuse_roughness evaluated with an Oren-Nayar lobe; this replaces "
+			+ "Godot's lighting for this material")
 	return true
+
+
+## True when the custom light node's every input port has a connection, and at
+## least one of its outputs reaches the light-stage output.
+func _light_stage_self_check(light_id: int) -> bool:
+	var light_stage: VisualShaderNodeCustom = _node(light_id)
+	if light_stage == null:
+		return false
+	# Custom nodes expose their ports through the script callbacks, not the
+	# C++ getters VisualShaderNode has: calling get_input_port_count() on one
+	# is a nonexistent-function error, which used to abort the whole build.
+	var port_count: int = light_stage.call("_get_input_port_count")
+	var connected: Dictionary = {}
+	for c in _shader.get_node_connections(LIGHT):
+		var d: Dictionary = c
+		if int(d["to_node"]) != light_id:
+			continue
+		connected[int(d["to_port"])] = true
+	for i in port_count:
+		if not connected.has(i):
+			return false
+	# And its outputs must reach the output node.
+	var output_wired: Dictionary = {"0": false, "1": false}
+	for c2 in _shader.get_node_connections(LIGHT):
+		var d2: Dictionary = c2
+		if int(d2["from_node"]) != light_id:
+			continue
+		if int(d2["to_node"]) != OUTPUT_NODE:
+			continue
+		output_wired[str(int(d2["from_port"]))] = true
+	return output_wired["0"] and output_wired["1"]
+
+
+## Removes every user node from the light stage, leaving only the implicit
+## output. Callers must also forget anything they wired to those nodes.
+func _teardown_light_stage() -> void:
+	for id in _shader.get_node_list(LIGHT):
+		if id == OUTPUT_NODE:
+			continue
+		_shader.remove_node(LIGHT, id)
+		_node_stage.erase(id)
+
+
+## The material's SPECULAR port value, computed in the light stage.
+##
+## The fragment fold already emitted the chain (or the single folded parameter);
+## re-emitting here reuses those uniforms through ParameterRefs and duplicates
+## only the constant and arithmetic nodes, which carry no state.
+func _specular_port_in_light(surface: MtlxDocument.MtlxElement) -> Ref2:
+	var prev := _stage
+	_stage = LIGHT
+	var f0: Variant = _specular_f0_chain(
+		surface.input("specular_IOR"), surface.input("specular"), _specular_col_scale)
+	var out := Ref2.new()
+	if f0 is float or f0 is int:
+		var node := _parameter_for("float", "specular",
+			sqrt(maxf(float(f0), 0.0) / GodotMap.GODOT_DIELECTRIC_SCALE))
+		out = Ref2.new(_add(node), 0)
+	else:
+		var f0_ref: Ref2 = _as_ref(f0)
+		if f0_ref.is_valid():
+			# SPECULAR = sqrt(F0 / 0.16); the divide folds into the multiply.
+			var scaled: int = _add(VisualShaderNodeFloatOp.new())
+			var mul: VisualShaderNodeFloatOp = _node(scaled)
+			mul.operator = GodotMap.FOP_MUL
+			mul.set_default_input_values([1, 1.0 / GodotMap.GODOT_DIELECTRIC_SCALE])
+			_connect(f0_ref, f0_ref.port, scaled, 0)
+
+			var sqrt_id: int = _add(VisualShaderNodeFloatFunc.new())
+			var fn: VisualShaderNodeFloatFunc = _node(sqrt_id)
+			fn.function = VisualShaderNodeFloatFunc.FUNC_SQRT
+			_connect(Ref2.new(scaled, 0), 0, sqrt_id, 0)
+			out = Ref2.new(sqrt_id, 0)
+	_stage = prev
+	return out
+
+
+## Wires the sheen inputs into the light node:
+## port 2 = weight, port 3 = roughness (default 0.3), port 4 = colour
+## (default white). Everything is emitted in the light stage: literals become
+## uniforms owned by this stage, links are re-emitted as light-stage node
+## chains (already vetted by _light_representable).
+##
+## Every port ends up wired, even when only the port default is wanted: a
+## script-constructed VisualShaderNodeCustom never gets its port defaults
+## filled in (update_input_port_default_values() runs on editor events), so an
+## unconnected input reaches _get_code as an empty string and the generated
+## GLSL fails to compile. Constants are cheaper than finding that out again.
+func _wire_sheen_to_light(surface: MtlxDocument.MtlxElement, light_id: int) -> bool:
+	var prev := _stage
+	_stage = LIGHT
+	var weight: Ref2 = _emit_input_or_null(surface.input("sheen"), surface.graph)
+	var rough: Ref2 = _emit_input_or_null(surface.input("sheen_roughness"), surface.graph)
+	var color: Ref2 = _emit_input_or_null(surface.input("sheen_color"), surface.graph)
+
+	if not weight.is_valid():
+		_stage = prev
+		return false
+	if not rough.is_valid():
+		rough = Ref2.new(_add(_constant_for("float", 0.3)), 0)
+	if not color.is_valid():
+		color = Ref2.new(_add(_constant_for("color3", Vector3.ONE)), 0)
+	_connect_light(weight, weight.port, light_id, 2)
+	_connect_light(rough, rough.port, light_id, 3)
+	_connect_light(color, color.port, light_id, 4)
+	_stage = prev
+	return true
+
+
+## Wires the light node's sheen ports to their MaterialX defaults, for materials
+## that do not use the lobe at all.
+func _wire_sheen_defaults_to_light(light_id: int) -> void:
+	var prev := _stage
+	_stage = LIGHT
+	var weight := Ref2.new(_add(_constant_for("float", 0.0)), 0)
+	var rough := Ref2.new(_add(_constant_for("float", 0.3)), 0)
+	var color := Ref2.new(_add(_constant_for("color3", Vector3.ONE)), 0)
+	_connect_light(weight, 0, light_id, 2)
+	_connect_light(rough, 0, light_id, 3)
+	_connect_light(color, 0, light_id, 4)
+	_stage = prev
+
+
+## True when a link's whole upstream chain consists of nodes the light stage
+## can host. The emitter's node set is stage-agnostic (constants, arithmetic,
+## textures, mixes), so this is mostly a guard against unknown node defs, which
+## emit nothing and would silently zero the lobe.
+func _light_representable(inp: MtlxDocument.MtlxInput, graph: String, depth: int = 0) -> bool:
+	if inp == null or not inp.is_link():
+		return true  # a literal becomes a uniform, always representable
+	if depth > 64:
+		return false  # cyclic or absurd; refuse rather than loop
+	var src: MtlxDocument.MtlxElement = _doc.source_element(inp, graph)
+	if src == null:
+		return false
+	if not src.def in LIGHT_EMITTABLE_DEFS:
+		return false
+	for k in src.inputs.keys():
+		var child: MtlxDocument.MtlxInput = src.inputs[k]
+		if not _light_representable(child, src.graph, depth + 1):
+			return false
+	return true
+
+
+## Every node def the emitter understands. The light stage hosts all of them --
+## none of them touch fragment-only output ports -- so representability is
+## exactly "the emitter knows this node".
+const LIGHT_EMITTABLE_DEFS := [
+	"constant", "image", "texcoord", "mix",
+	"multiply", "add", "subtract", "divide", "power", "max", "min",
+	"extract", "normal", "normalmap", "tangent",
+	"clamp", "floor", "invert", "sqrt", "absolutevalue",
+	"dot", "normalize", "convert", "combine3", "overlay", "hsvadjust",
+	"tiledimage",
+]
+
+
+## Sheen routing: the light node's Imageworks lobe when the custom lighting
+## took the material, Godot's RIM otherwise.
+##
+## The RIM fallback is a close analogue rather than an identity, and its shape
+## is wrong in a way that shows: MaterialX's sheen is retroreflective and
+## roughness-dependent, while Godot's rim is fresnel-weighted with an exponent
+## from the surface roughness. On a black fabric that rim paints a wide white
+## ring around every face -- the "black hole with a disk" look the real lobe
+## replaces on the custom path.
+func _fold_sheen(surface: MtlxDocument.MtlxElement, custom_lit: bool) -> void:
+	var inp: MtlxDocument.MtlxInput = surface.input("sheen")
+	if inp == null:
+		return
+	if custom_lit and _sheen_wired_light:
+		# The light node carries the lobe; writing RIM too would stack two
+		# sheens. RIM is inert under LIGHT_CODE_USED anyway.
+		return
+
+	var src: Ref2 = _emit_input_or_null(inp, surface.graph)
+	if not src.is_valid():
+		return
+	_connect_output(src, GodotMap.OUT_RIM)
+	_fold_sheen_color(surface)
 
 
 ## Godot's RIM_TINT is a scalar, not a colour.
@@ -836,6 +1302,12 @@ func _transmission_ref(surface: MtlxDocument.MtlxElement) -> Ref2:
 
 ## A float op node with one or both operands supplied; a float value is set as
 ## the port's default, a Ref2 is wired.
+##
+## The Ref2's own port is honoured, not assumed to be 0: this chain feeds the
+## refraction mask with FRAGCOORD.z (decompose port 2) and the depth texture's
+## r (expanded port 1), and a hardwired 0 once made the mask read FRAGCOORD.x
+## -- depth minus screen x, which is meaningless and sat below zero almost
+## everywhere, so the mask closed and the refraction went inert.
 func _fop(op: int, a: Variant, b: Variant) -> Ref2:
 	var id: int = _add(VisualShaderNodeFloatOp.new())
 	var node: VisualShaderNodeFloatOp = _node(id)
@@ -844,11 +1316,13 @@ func _fop(op: int, a: Variant, b: Variant) -> Ref2:
 	if a is float or a is int:
 		defaults += [0, float(a)]
 	else:
-		_connect(_as_ref(a), 0, id, 0)
+		var a_ref := _as_ref(a)
+		_connect(a_ref, a_ref.port, id, 0)
 	if b is float or b is int:
 		defaults += [1, float(b)]
 	else:
-		_connect(_as_ref(b), 0, id, 1)
+		var b_ref := _as_ref(b)
+		_connect(b_ref, b_ref.port, id, 1)
 	if not defaults.is_empty():
 		node.set_default_input_values(defaults)
 	return Ref2.new(id, 0)
@@ -929,6 +1403,12 @@ func _any(type: String, name: String, value: Variant) -> VisualShaderNode:
 const RESERVED_PARAM_NAMES := [
 	"base", "blend", "b", "c", "d", "e", "g", "p", "q", "r", "K",
 	"samp", "max1", "max2", "_bv",
+	# Locals the Oren-Nayar light node's code declares. A parameter sharing one
+	# of these names would shadow the uniform inside light() and fail to
+	# compile with "Redefinition".
+	"mx_specular_port", "mx_sheen_weight", "mx_sheen_roughness",
+	"mx_sheen_color", "mx_sheen_throughput", "mx_sheen_dir_albedo",
+	"mx_base_diffuse", "mx_NdotL_s", "mx_brdf",
 ]
 
 
@@ -939,8 +1419,23 @@ func _safe_param_name(name: String) -> String:
 	return name
 
 
+## A node for a literal, as a shader parameter.
+##
+## Parameters are the same uniform whichever stage reads them, but the
+## declaration is emitted once per Parameter node, so a name needed by two
+## stages (the folded `specular` reaches both the SPECULAR port and the
+## Oren-Nayar light node) must have exactly one owner. The first request wins
+## ownership; later requests from another stage get a ParameterRef, which emits
+## the same uniform without declaring it.
 func _parameter_for(type: String, name: String, value: Variant) -> VisualShaderNode:
 	var safe := _safe_param_name(name)
+	var owner_stage: int = int(_param_owners.get(safe, -1))
+	if owner_stage != -1 and owner_stage != _stage:
+		var ref := VisualShaderNodeParameterRef.new()
+		ref.parameter_name = safe
+		return ref
+	if owner_stage == -1:
+		_param_owners[safe] = _stage
 	match type:
 		"float", "float1":
 			var f := VisualShaderNodeFloatParameter.new()
@@ -987,11 +1482,12 @@ func _parameter_for(type: String, name: String, value: Variant) -> VisualShaderN
 
 
 func _emit_element(el: MtlxDocument.MtlxElement) -> Ref2:
-	if el in _cache:
-		return _cache[el]
+	var cache: Dictionary = _cache_light if _stage == LIGHT else _cache
+	if cache.has(el):
+		return cache[el]
 
 	var ref: Ref2 = _emit_uncached(el)
-	_cache[el] = ref
+	cache[el] = ref
 	return ref
 
 
@@ -1527,22 +2023,24 @@ func _neutral_for(type: String) -> Variant:
 
 func _add(node: VisualShaderNode) -> int:
 	var id: int = _next_id
-	_shader.add_node(FRAGMENT, node, Vector2.ZERO, id)
+	_shader.add_node(_stage, node, Vector2.ZERO, id)
+	_node_stage[id] = _stage
 	_next_id += 1
 	return id
 
 
-## Adds a node to the light stage. Node ids are shared across stages, so the same
-## counter is safe.
+## Adds a node to the light stage regardless of _stage. Kept as a name because
+## the custom-lighting call sites read better with it.
 func _add_light(node: VisualShaderNode) -> int:
-	var id: int = _next_id
-	_shader.add_node(LIGHT, node, Vector2.ZERO, id)
-	_next_id += 1
+	var prev := _stage
+	_stage = LIGHT
+	var id: int = _add(node)
+	_stage = prev
 	return id
 
 
 func _node(id: int) -> VisualShaderNode:
-	return _shader.get_node(FRAGMENT, id)
+	return _shader.get_node(int(_node_stage.get(id, FRAGMENT)), id)
 
 
 ## Wires `from`'s output into `to_node`'s input `to_port`.
@@ -1552,7 +2050,8 @@ func _node(id: int) -> VisualShaderNode:
 ## "_connect(ref, 0, port)" ambiguous with "_connect(ref, 0, node, port)" and
 ## silently wired operands into the shader output.
 func _connect(from: Ref2, from_port: int, to_node: int, to_port: int) -> void:
-	_shader.connect_nodes_forced(FRAGMENT, from.node, from_port, to_node, to_port)
+	var stage: int = int(_node_stage.get(from.node, FRAGMENT))
+	_shader.connect_nodes_forced(stage, from.node, from_port, to_node, to_port)
 
 
 
@@ -1575,9 +2074,10 @@ func _drives(surface: MtlxDocument.MtlxElement, name: String) -> bool:
 	return not GodotMap.is_default(name, GodotMap._as_vector3(value))
 
 
-## Connects within the light stage.
+## Connects within the light stage. Kept for readability at the call sites that
+## wire the light node's outputs; the stage now comes from the from-node itself.
 func _connect_light(from: Ref2, from_port: int, to_node: int, to_port: int) -> void:
-	_shader.connect_nodes_forced(LIGHT, from.node, from_port, to_node, to_port)
+	_connect(from, from_port, to_node, to_port)
 
 
 ## Wires into the implicit output node, whose ports are the ALBEDO/METALLIC/...

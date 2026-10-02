@@ -23,11 +23,14 @@ extends SceneTree
 ## exactly, with no assumption about how wrong the specular lobe is, and no
 ## masking that could quietly exclude the pixels that matter.
 ##
-## The distinction matters because the two lobes fail differently. The node fits
-## the split-sum DFG energy-compensation term analytically, because a light
-## function cannot sample the lookup texture (scene_forward_clustered_inc.glsl:502)
-## where Godot reads the real texture, so specular is knowingly approximate. The
-## diffuse lobe has no such excuse and must match.
+## The distinction used to matter because the two lobes failed differently: the
+## node fits the split-sum DFG energy-compensation term analytically, because a
+## light function cannot sample the lookup texture
+## (scene_forward_clustered_inc.glsl:502) where Godot reads the real texture, so
+## specular was knowingly approximate. After the dielectric began reading the
+## SPECULAR port and f90 was corrected to the channel sum, the measured specular
+## error dropped below the same quantisation floor the diffuse sits at -- both
+## assertions now demand the floor.
 
 const OrenNayarLight := preload("res://addons/materialx/mtlx_oren_nayar_light.gd")
 const GodotMap := preload("res://addons/materialx/godot_map.gd")
@@ -116,9 +119,10 @@ func _run() -> void:
 	_expect(_mean(diffuse) <= QUANT_FLOOR,
 		"diffuse sits at the quantisation floor, so it cannot be distinguished "
 		+ "from Godot's own Lambert -- and a real regression would clear it")
-	_expect(_max(specular) > _max(diffuse),
-		"specular is where the remaining error lives, as expected from the "
-		+ "analytic DFG fit")
+	_expect(_mean(specular) <= QUANT_FLOOR,
+		"specular also sits at the quantisation floor: with the dielectric read "
+		+ "from the SPECULAR port and f90 from the channel sum, the analytic DFG "
+		+ "fit is barely distinguishable from the texture")
 
 	print("\n--- %s ---" % ("equivalence OK" if _bad == 0 else "%d failure(s)" % _bad))
 	quit(1 if _bad > 0 else 0)
@@ -157,6 +161,32 @@ func _shader(albedo: Color, unused_mode: bool, custom_light: bool) -> VisualShad
 		sh.add_node(LIGHT_STAGE, light, Vector2(220, 0), 3)
 
 		sh.connect_nodes_forced(LIGHT_STAGE, 2, 0, 3, 0)
+
+		# Every remaining port must be wired: a script-constructed custom node
+		# never gets its port defaults filled in, so an unconnected input
+		# reaches _get_code as an empty string and the shader fails to compile.
+		# The specular value is Godot's own default (SPECULAR 0.5 == IOR 1.5),
+		# which is what the unwired SPECULAR output above leaves the built-in
+		# path with -- so both paths dielectric-match by construction.
+		var spec := VisualShaderNodeFloatConstant.new()
+		spec.constant = 0.5
+		sh.add_node(LIGHT_STAGE, spec, Vector2(0, -180), 4)
+		sh.connect_nodes_forced(LIGHT_STAGE, 4, 0, 3, 1)
+
+		var sheen_w := VisualShaderNodeFloatConstant.new()
+		sheen_w.constant = 0.0
+		sh.add_node(LIGHT_STAGE, sheen_w, Vector2(0, -260), 5)
+		sh.connect_nodes_forced(LIGHT_STAGE, 5, 0, 3, 2)
+
+		var sheen_r := VisualShaderNodeFloatConstant.new()
+		sheen_r.constant = 0.3
+		sh.add_node(LIGHT_STAGE, sheen_r, Vector2(0, -340), 6)
+		sh.connect_nodes_forced(LIGHT_STAGE, 6, 0, 3, 3)
+
+		var sheen_c := VisualShaderNodeVec3Constant.new()
+		sheen_c.constant = Vector3.ONE
+		sh.add_node(LIGHT_STAGE, sheen_c, Vector2(0, -420), 7)
+		sh.connect_nodes_forced(LIGHT_STAGE, 7, 0, 3, 4)
 		# The node's two outputs go to the light stage's own output ports:
 		# DIFFUSE_LIGHT = 0, SPECULAR_LIGHT = 1.
 		sh.connect_nodes_forced(LIGHT_STAGE, 3, 0, OUTPUT_NODE, 0)

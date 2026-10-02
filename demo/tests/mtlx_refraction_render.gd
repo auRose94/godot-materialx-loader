@@ -27,7 +27,9 @@ extends SceneTree
 const Emitter := preload("res://addons/materialx/mtlx_emitter.gd")
 
 const FLAG := "materialx/screen_space_refraction"
-const GLASS := "res://materials/mtlx/Glass.mtlx"
+## The subject lives wherever the corpus does. Overridable with
+## `-- res://path/to/a/folder/containing/Glass.mtlx`; the default looks in the
+## two layouts the projects here actually use.
 const PARAM := "refraction_strength"
 const RES := 256
 ## A disc well inside the sphere's silhouette, so the rim and the background around
@@ -43,12 +45,23 @@ func _init() -> void:
 	_run.call_deferred()
 
 
+func _glass_path() -> String:
+	var user_args := OS.get_cmdline_user_args()
+	if user_args.size() > 0 and not user_args[0].begins_with("--"):
+		return user_args[0].path_join("Glass.mtlx")
+	for candidate in ["res://materials/Glass.mtlx", "res://materials/mtlx/Glass.mtlx"]:
+		if FileAccess.file_exists(candidate):
+			return candidate
+	return "res://materials/Glass.mtlx"
+
+
 func _run() -> void:
 	var saved: Variant = ProjectSettings.get_setting(FLAG, false)
 	var had := ProjectSettings.has_setting(FLAG)
 	ProjectSettings.set_setting(FLAG, true)
 
-	var result := Emitter.build_file(GLASS, PackedStringArray(["res://materials/mtlx"]))
+	var glass := _glass_path()
+	var result := Emitter.build_file(glass, PackedStringArray([glass.get_base_dir()]))
 	if had:
 		ProjectSettings.set_setting(FLAG, saved)
 	else:

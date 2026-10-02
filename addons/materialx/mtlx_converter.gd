@@ -236,6 +236,37 @@ func _as_material(result: Emitter.Result) -> Resource:
 	return mat
 
 
+## Builds one material and saves it, honouring the dry-run flag. Returns true
+## when the file was (or would be) written.
+##
+## Includes a canary against the silent-failure class that bit once: a custom
+## light node left with an unwired input emits "max(, 0.0)" and the shader
+## refuses to compile. The emitter self-checks its wiring, so reaching this
+## canary means the addon scripts the editor is running are older than the ones
+## on disk (the editor caches scripts until the project reloads); the right
+## response is to reload and reconvert, not to save a file every mesh will
+## reject.
+func _convert_and_save(path: String, dry_run: bool) -> MtlxEmitter.Result:
+	var result: MtlxEmitter.Result = Emitter.build_file(path)
+	if not result.ok:
+		_log.text += "[color=red]FAIL[/color] %s: %s\n" % [path.get_file(), result.message]
+		return null
+
+	var code: String = result.shader.code
+	for signature in ["max(,", "min(,", "clamp(,", "mix(,", "ERROR"]:
+		if code.contains(signature):
+			_log.text += "[color=red]FAIL[/color] %s: generated shader would not compile -- the editor is running stale addon scripts; reload the project and reconvert\n" % path.get_file()
+			return null
+
+	if not dry_run:
+		var out_path: String = path.get_basename() + ".tres"
+		var err: Error = ResourceSaver.save(_as_material(result), out_path)
+		if err != OK:
+			_log.text += "[color=red]SAVE FAIL[/color] %s (err %d)\n" % [out_path, err]
+			return null
+	return result
+
+
 func _on_convert() -> void:
 	var dir: String = _folder.text.strip_edges()
 	var files: PackedStringArray = _list_mtlx(dir)
@@ -249,19 +280,10 @@ func _on_convert() -> void:
 	var dropped_total := 0
 
 	for path in files:
-		var result: MtlxEmitter.Result = Emitter.build_file(path)
-		if not result.ok:
+		var result: MtlxEmitter.Result = _convert_and_save(path, _dry_run)
+		if result == null:
 			failed += 1
-			_log.text += "[color=red]FAIL[/color] %s: %s\n" % [path.get_file(), result.message]
 			continue
-
-		var out_path: String = path.get_basename() + ".tres"
-		if not _dry_run:
-			var err: Error = ResourceSaver.save(_as_material(result), out_path)
-			if err != OK:
-				failed += 1
-				_log.text += "[color=red]SAVE FAIL[/color] %s (err %d)\n" % [out_path, err]
-				continue
 		written += 1
 		dropped_total += result.dropped.size()
 
@@ -278,7 +300,6 @@ func _on_convert() -> void:
 
 	if not _dry_run:
 		EditorInterface.get_resource_filesystem().scan()
-
 
 func _on_fix_imports() -> void:
 	var dir: String = _folder.text.strip_edges()

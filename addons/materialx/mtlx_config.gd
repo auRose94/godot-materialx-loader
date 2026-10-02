@@ -65,6 +65,14 @@ const LEGACY_CUSTOM_LIGHTING := PREFIX + "experimental_custom_lighting"
 ## a choice this addon makes.
 const SCREEN_SPACE_REFRACTION := PREFIX + "screen_space_refraction"
 
+## Settings the removed thumbnail pipeline read. A key that no longer reads
+## anything is worse than an absent one -- it looks configurable and is not --
+## so projects that still carry them have them dropped on first load.
+const DEAD_KEYS := [
+	PREFIX + "auto_bake_previews",
+	PREFIX + "preview_size",
+]
+
 ## Registers every setting with its default and a type, so it shows up in the
 ## Project Settings window with a sensible editor rather than as raw text.
 ##
@@ -92,6 +100,7 @@ static func install_defaults() -> bool:
 	wrote = _set_if_missing(SCREEN_SPACE_REFRACTION, false, {
 		"type": TYPE_BOOL,
 	}) or wrote
+	_drop_dead()
 	return wrote
 
 
@@ -106,6 +115,14 @@ static func _drop_legacy() -> void:
 		ProjectSettings.set_setting(CUSTOM_LIGHTING,
 			bool(ProjectSettings.get_setting(LEGACY_CUSTOM_LIGHTING, true)))
 	ProjectSettings.set_setting(LEGACY_CUSTOM_LIGHTING, null)
+
+
+## Same treatment for keys of features that no longer exist. They are inside the
+## addon's own namespace, so removing them touches nothing the user owns.
+static func _drop_dead() -> void:
+	for key in DEAD_KEYS:
+		if ProjectSettings.has_setting(key):
+			ProjectSettings.set_setting(key, null)
 
 
 static func _set_if_missing(key: String, value: Variant, info: Dictionary) -> bool:

@@ -1,12 +1,13 @@
 extends SceneTree
 
 ## Renders the README hero image: a contact sheet of converted MaterialX
-## materials, each on its own sphere, under this project's environment.
+## materials, each on its own sphere, under the demo project's environment.
 ##
-## Uses the project's own default environment rather than a neutral studio setup,
-## because that is the honest picture -- the reflection in Gold_Foil or
-## Perforated_Metal is the sky you are actually going to see, and a material that
-## only looks good against a studio HDRI is not much use.
+## Uses the demo environment rather than a neutral studio setup, because that is
+## the honest picture -- the reflection in Gold_Foil or Perforated_Metal is the
+## sky you are actually going to see, and a material that only looks good against
+## a studio HDRI is not much use. Run it from the project that owns the corpus
+## (textures load through res://); the environment is found next to this script.
 ##
 ## Nine materials on a 3x3 grid: the four simple ones the README already showed,
 ## then five from the standard library that exercise what conversion has to cope
@@ -17,8 +18,9 @@ extends SceneTree
 
 const Emitter := preload("res://addons/materialx/mtlx_emitter.gd")
 
-const OUT := "/mnt/matrix/Work/godot-materialx-loader/docs/preview.png"
-
+## Where the contact sheet lands. Defaults to the repo's docs/ (found relative
+## to this script, wherever the repo is checked out); override with
+## `-- --out /path/to/preview.png`.
 const SIZE := Vector2i(1200, 1200)
 const COLS := 3
 const SPACING := 3.4
@@ -28,13 +30,18 @@ const RADIUS := 1.0
 ## than tuned. The capture is discarded unless every sphere has drawn.
 const SETTLE_FRAMES := 90
 
-## Grid_Paint is hand-written for the demo project rather than part of the
-## matlib corpus, so it is staged into this project before the shoot. An absolute
-## path, because res:// cannot reach across projects; the staging is checked and
-## reported rather than assumed, so a missing checkout fails with a sentence
-## instead of an empty cell.
+## The folder holding the .mtlx corpus to shoot, resolved from `--` args
+## (`-- res://materials/mtlx`), falling back to this project's res://materials.
+const DEFAULT_DIR := "res://materials"
+
+## Grid_Paint is hand-written for the demo project rather than part of any
+## corpus, so it is staged into the running project before the shoot. The demo
+## lives next to this script, so the source works no matter where either
+## project sits. An absolute path is used for the copy, because res:// cannot
+## reach across projects; the staging is checked and reported rather than
+## assumed, so a missing checkout fails with a sentence instead of an empty
+## cell.
 const STAGE_DIR := "res://hero_staging/materials"
-const GRID_PAINT_SOURCE := "/mnt/matrix/Work/godot-materialx-loader/demo/materials"
 const GRID_PAINT_FILES := [
 	"Grid_Paint.mtlx",
 	"textures/Demo_Grid.png",
@@ -42,16 +49,17 @@ const GRID_PAINT_FILES := [
 ]
 
 ## Simple first, then the complex ones, so the grid reads as a progression.
+## Names are resolved against the material dir.
 const MATERIALS := [
-	["res://materials/Gold.mtlx", "materials"],
-	["res://materials/Glass.mtlx", "materials"],
-	["res://materials/Rubber.mtlx", "materials"],
-	["res://hero_staging/materials/Grid_Paint.mtlx", "hero_staging/materials"],
-	["res://materials/Black_Upholstery.mtlx", "materials"],
-	["res://materials/Glazed_Cube_Pattern_Tiles.mtlx", "materials"],
-	["res://materials/TH_Blue_Denim_Fabric.mtlx", "materials"],
-	["res://materials/Gold_Foil.mtlx", "materials"],
-	["res://materials/Perforated_Metal.mtlx", "materials"],
+	"Gold.mtlx",
+	"Glass.mtlx",
+	"Rubber.mtlx",
+	"hero_staging:Grid_Paint.mtlx",
+	"Black_Upholstery.mtlx",
+	"Glazed_Cube_Pattern_Tiles.mtlx",
+	"TH_Blue_Denim_Fabric.mtlx",
+	"Gold_Foil.mtlx",
+	"Perforated_Metal.mtlx",
 ]
 
 
@@ -59,9 +67,34 @@ func _init() -> void:
 	_shoot.call_deferred()
 
 
+func _output_path() -> String:
+	for arg in OS.get_cmdline_user_args():
+		if arg.begins_with("--out="):
+			return arg.trim_prefix("--out=")
+		if arg == "--out" :
+			continue
+	# Next to this script: <repo>/demo/tests -> <repo>/docs/preview.png.
+	var here: String = get_script().resource_path.get_base_dir()
+	return here.path_join("../../docs/preview.png")
+
+
+func _material_dir() -> String:
+	var user_args := OS.get_cmdline_user_args()
+	for arg in user_args:
+		if not arg.begins_with("--"):
+			return arg
+	return DEFAULT_DIR
+
+
+func _demo_materials_dir() -> String:
+	var here: String = get_script().resource_path.get_base_dir()
+	return here.path_join("../materials")
+
+
 func _shoot() -> void:
+	var mat_dir := _material_dir()
 	if not _stage_grid_paint():
-		print("  FAIL: could not stage Grid_Paint from %s" % GRID_PAINT_SOURCE)
+		print("  FAIL: could not stage Grid_Paint from %s" % _demo_materials_dir())
 		quit(1)
 		return
 
@@ -117,8 +150,15 @@ func _shoot() -> void:
 
 	var failed := 0
 	for i in MATERIALS.size():
-		var path: String = MATERIALS[i][0]
-		var root: String = MATERIALS[i][1]
+		var name: String = MATERIALS[i]
+		var path: String
+		var root: String
+		if name.begins_with("hero_staging:"):
+			path = STAGE_DIR.path_join(name.trim_prefix("hero_staging:"))
+			root = STAGE_DIR
+		else:
+			path = mat_dir.path_join(name)
+			root = mat_dir
 		if not _add_sphere(vp, path, root, i):
 			failed += 1
 
@@ -130,21 +170,23 @@ func _shoot() -> void:
 	var img: Image = vp.get_texture().get_image()
 	_report_cells(img)
 
-	var err := img.save_png(OUT)
+	var out := _output_path()
+	var err := img.save_png(out)
 	if err != OK:
-		print("  FAIL: could not write %s (error %d)" % [OUT, err])
+		print("  FAIL: could not write %s (error %d)" % [out, err])
 		quit(1)
 		return
 
-	print("wrote %s (%dx%d, %d material(s) failed)" % [OUT, SIZE.x, SIZE.y, failed])
+	print("wrote %s (%dx%d, %d material(s) failed)" % [out, SIZE.x, SIZE.y, failed])
 	quit(1 if failed > 0 else 0)
 
 
 ## Copies the demo project's hand-written Grid_Paint into this project so the
 ## sheet can include it. Returns false with a clear reason if it cannot.
 func _stage_grid_paint() -> bool:
-	if not DirAccess.dir_exists_absolute(GRID_PAINT_SOURCE):
-		push_warning("demo project not found at %s" % GRID_PAINT_SOURCE)
+	var source := _demo_materials_dir()
+	if not DirAccess.dir_exists_absolute(source):
+		push_warning("demo project materials not found at %s" % source)
 		return false
 	if DirAccess.make_dir_recursive_absolute(
 			ProjectSettings.globalize_path(STAGE_DIR + "/textures")) != OK:
@@ -155,14 +197,14 @@ func _stage_grid_paint() -> bool:
 		if FileAccess.file_exists(dst):
 			continue
 		var err := DirAccess.copy_absolute(
-			GRID_PAINT_SOURCE.path_join(f), dst)
+			source.path_join(f), dst)
 		if err != OK:
 			push_warning("could not stage %s (error %d)" % [f, err])
 			return false
 	return true
 
 
-## A soft vertical gradient behind the spheres.## Prints the mean luminance of each grid cell.
+## Prints the mean luminance of each grid cell.
 ##
 ## This image is the addon's front page, and it is rendered by a script rather
 ## than photographed, so the failure modes are silent: an unrotated camera gives
@@ -242,7 +284,7 @@ func _report_cells(img: Image) -> void:
 ## converted, which must not be silently skipped -- a hole in the sheet would
 ## ship as a broken README.
 func _add_sphere(vp: SubViewport, path: String, root: String, index: int) -> bool:
-	var result := Emitter.build_file(path, PackedStringArray(["res://" + root]))
+	var result := Emitter.build_file(path, PackedStringArray([root]))
 	if not result.ok:
 		print("  FAIL: %s: %s" % [path.get_file(), result.message])
 		return false
@@ -267,16 +309,23 @@ func _add_sphere(vp: SubViewport, path: String, root: String, index: int) -> boo
 	return true
 
 
-## This project's environment, which the project settings point at. Falls back to
-## the sky alone rather than inventing a studio look, so the image cannot
-## accidentally flatter the materials.
+## The running project's environment, which the project settings point at.
+## Falls back to the sky alone rather than inventing a studio look, so the image
+## cannot accidentally flatter the materials.
+##
+## One correction is applied in memory: a procedural sun wider than 20 degrees
+## is clamped to the 8-degree disk the demo environment ships with. A sun that
+## fills a sixth of the sky reads as a halo around whatever stands in front of
+## it -- a black sphere centred on the sun looks like a black hole with a disk,
+## which is a statement about the sky, not about the materials. The loaded
+## resource is modified, never saved.
 func _environment() -> Environment:
 	var path: String = ProjectSettings.get_setting(
 		"rendering/environment/defaults/default_environment", "")
 	if path != "" and ResourceLoader.exists(path):
 		var res: Resource = load(path)
 		if res is Environment:
-			return res
+			return _clamp_sun(res)
 	push_warning("no default environment found; using a bare sky")
 	var env := Environment.new()
 	env.background_mode = Environment.BG_SKY
@@ -285,6 +334,16 @@ func _environment() -> Environment:
 	sky.sky_material = mat
 	env.sky = sky
 	env.ambient_light_source = Environment.AMBIENT_SOURCE_SKY
+	return env
+
+
+func _clamp_sun(env: Environment) -> Environment:
+	if env.sky == null or not (env.sky.sky_material is ProceduralSkyMaterial):
+		return env
+	var mat: ProceduralSkyMaterial = env.sky.sky_material
+	if mat.sun_angle_max > 20.0:
+		mat.sun_angle_max = 8.0
+		mat.sun_curve = 0.08
 	return env
 
 

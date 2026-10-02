@@ -53,8 +53,12 @@ func _init() -> void:
 	_expect(on.ok, "converts with the flag on")
 	print("\n  fragment nodes: %d, light nodes: %d" % [
 		on.shader.get_node_list(1).size(), on.shader.get_node_list(LIGHT).size()])
-	_expect(_light_user_nodes(on.shader) == 2,
-		"flag on: the sigma constant and the light node were added")
+	# The sigma constant, the light node, the specular ParameterRef and the
+	# three sheen-default constants. Every input of a custom node must be
+	# wired, so the count is exact: fewer means an unwired port, which compiles
+	# to an empty expression.
+	_expect(_light_user_nodes(on.shader) == 6,
+		"flag on: sigma, the light node, the specular uniform and the sheen defaults were added")
 	_expect(on.shader.code.contains(OREN_MARKER),
 		"flag on: the Oren-Nayar term is in the generated code")
 	_expect(on.shader.get_node_connections(LIGHT).size() >= 2,

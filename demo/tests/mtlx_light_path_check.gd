@@ -33,6 +33,32 @@ const DISC := 18
 ## a couple of quantisation steps is the floor, not signal.
 const TOLERANCE := 0.02
 
+## Small enough that the Oren-Nayar term is within 1e-7 of Lambert, large
+## enough that the gate does not read it as the 0.0 default and refuse the
+## material. Writing the variant at exactly 0.0 would make the whole sigma-0
+## comparison vacuous: the gate would decline the material, both renders would
+## be Godot's own lighting, and the delta would be zero by construction no
+## matter what the light node actually computes.
+const EPSILON_SIGMA := 0.0001
+
+## The synthetic dielectric used for the specular equivalence: broad highlight,
+## mid grey, everything else default.
+const SPECULAR_SUBJECT := """<?xml version="1.0" encoding="utf-8"?>
+<materialx version="1.38">
+  <standard_surface name="spec_subject" type="surfaceshader">
+    <input name="base_color" type="color3" value="0.5, 0.5, 0.5" />
+    <input name="metalness" type="float" value="0" />
+    <input name="specular" type="float" value="1" />
+    <input name="specular_IOR" type="float" value="1.5" />
+    <input name="specular_roughness" type="float" value="0.4" />
+    <input name="diffuse_roughness" type="float" value="%s" />
+  </standard_surface>
+  <surfacematerial name="spec_subject" type="material">
+    <input name="surfaceshader" type="surfaceshader" nodename="spec_subject" />
+  </surfacematerial>
+</materialx>
+"""
+
 var _bad := 0
 
 
@@ -46,7 +72,7 @@ func _run() -> void:
 	var subjects: PackedStringArray = _custom_lighting_corpus()
 	print("checking %d material(s) on the custom lighting path\n" % subjects.size())
 	print("%-32s %9s %9s %9s %9s" % [
-		"material", "godot", "sigma=0", "authored", "expected"])
+		"material", "godot", "sigma~0", "authored", "expected"])
 
 	var mismatched := 0
 	var darkened := 0
@@ -56,7 +82,7 @@ func _run() -> void:
 		var builtin: float = await _luminance(path)
 
 		_set_custom(true)
-		var at_zero: float = await _luminance(_variant(path, 0.0))
+		var at_zero: float = await _luminance(_variant(path, EPSILON_SIGMA))
 		var authored: float = await _luminance(path)
 
 		var delta: float = at_zero - builtin
@@ -72,7 +98,6 @@ func _run() -> void:
 			darkened += 1
 
 	_set_custom(false)
-	_cleanup()
 
 	print("\n=== verdict ===")
 	print("  materials whose sigma 0 disagrees with Godot : %d / %d" % [
@@ -83,6 +108,22 @@ func _run() -> void:
 	_expect(mismatched == 0,
 		"at sigma 0 the custom path reproduces Godot's own lighting, which is "
 		+ "the invariant that catches transcription faults")
+
+	# A second, sharper invariant. The corpus check above is diffuse-weighted:
+	# its probe disc sits at the sphere centre, the light is off-axis, and the
+	# corpus materials are moderately rough, so the specular lobe barely moves
+	# the numbers. That is exactly how a wrong dielectric F0 survived for a
+	# while: the light node built F0 from a constant 0.16 instead of the
+	# SPECULAR port, 4x too reflective, and every centre-disc delta stayed at
+	# zero. The subject below exists to catch that class of fault: a plain
+	# dielectric with a broad, centred highlight.
+	var spec := await _specular_equivalence_raw()
+	print("\n  dielectric specular equivalence (on-axis, centre probe): %+.4f (godot %.4f custom %.4f)" % [spec[1] - spec[0], spec[0], spec[1]])
+	_expect(absf(spec[1] - spec[0]) <= TOLERANCE,
+		"the custom path's specular reproduces Godot's on a dielectric with a "
+		+ "broad highlight -- this is what catches a wrong dielectric F0")
+
+	_cleanup()
 
 	print("\n--- %s ---" % ("light path OK" if _bad == 0 else "%d failure(s)" % _bad))
 	quit(1 if _bad > 0 else 0)
@@ -142,6 +183,37 @@ func _variant(path: String, sigma: float) -> String:
 	return dst
 
 
+## Builds the synthetic dielectric subject and returns how far the custom path
+## renders from Godot's own lighting, both measured at the centre of a sphere
+## lit on axis -- so the probe sits inside the specular highlight, where a wrong
+## dielectric F0 cannot hide.
+func _specular_equivalence_raw() -> Array:
+	var out := [0.0, 0.0]
+	DirAccess.make_dir_recursive_absolute(ProjectSettings.globalize_path(TMP))
+	var path := TMP.path_join("spec_subject.mtlx")
+	var f := FileAccess.open(path, FileAccess.WRITE)
+	if f == null:
+		_bad += 1
+		print("  FAIL: could not write the specular subject to %s" % path)
+		return [0.0, 0.0]
+	f.store_string(SPECULAR_SUBJECT % str(EPSILON_SIGMA))
+	f = null
+
+	_set_custom(false)
+	var builtin: float = await _luminance(path, true)
+	_set_custom(true)
+	var custom: float = await _luminance(path, true)
+	_set_custom(false)
+	DirAccess.remove_absolute(ProjectSettings.globalize_path(path))
+	if builtin < 0.0 or custom < 0.0:
+		_bad += 1
+		print("  FAIL: the specular subject did not build or render")
+		return [0.0, 0.0]
+	out[0] = builtin
+	out[1] = custom
+	return out
+
+
 ## Every corpus material the custom lighting path takes over, found by building
 ## and looking for the light node so the list cannot drift from the gate.
 func _custom_lighting_corpus() -> PackedStringArray:
@@ -175,7 +247,7 @@ func _cleanup() -> void:
 	DirAccess.remove_absolute(abs_dir)
 
 
-func _luminance(path: String) -> float:
+func _luminance(path: String, on_axis: bool = false) -> float:
 	var result := Emitter.build_file(path, PackedStringArray(["res://materials"]))
 	if not result.ok:
 		push_warning("%s did not build: %s" % [path, result.message])
@@ -203,7 +275,13 @@ func _luminance(path: String) -> float:
 	vp.add_child(cam)
 
 	var light := DirectionalLight3D.new()
-	light.rotation = Vector3(deg_to_rad(-38.0), deg_to_rad(-26.0), 0.0)
+	if on_axis:
+		# Shining from the camera: the specular highlight lands on the sphere's
+		# centre, inside the probe disc. Identity rotation points the light
+		# from the camera into the scene.
+		light.rotation = Vector3.ZERO
+	else:
+		light.rotation = Vector3(deg_to_rad(-38.0), deg_to_rad(-26.0), 0.0)
 	light.light_energy = 2.4
 	light.shadow_enabled = false
 	vp.add_child(light)

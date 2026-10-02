@@ -5,6 +5,127 @@ All notable changes to this project are documented here.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 the project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.4.0] — 2026-10-01
+
+### Fixed
+
+- **Screen-space refraction compounded its own output into a "black hole with a
+  disk".** A material that reads the screen but writes no ALPHA stays in the
+  opaque pass, and the renderer copies the screen texture *after* that pass —
+  so during the draw the sampler still held the previous frame's copy, which
+  contains the object itself. Every frame the surface re-absorbed an image of
+  itself: sky leaked inward from the silhouette and compounded into a glowing
+  ring, while the centre kept re-sampling its own dark body. The fix mirrors
+  Godot's own `BaseMaterial3D` refraction (material.cpp, FEATURE_REFRACTION):
+
+  - `ALPHA = 1.0` is written unconditionally, which moves the material to the
+    transparent pass, after the screen copy — no feedback.
+  - The surface dims by the amount of background it shows
+    (`ALBEDO *= 1 - background`), and the sample is *added* to EMISSION.
+    Stacking a fully lit surface and a full background sample was the halo.
+  - The displaced UV is masked against the depth buffer (engine parity): a
+    foreground object crossing the sample no longer reads as background. The
+    engine reconstructs view-space Z through a matrix; here the same decision
+    is made by comparing raw window depths, which needs no matrix nodes — with
+    the sign that Godot 4.3+'s reversed-Z depth buffer requires (the opaque
+    pass clears depth to 0.0). The blend width is the `refraction_softness`
+    parameter.
+  - The screen sample is blurred by roughness (`textureLod`, ROUGHNESS × 8),
+    engine parity, so rough glass blurs what it shows.
+  - The offset now follows the refracted ray's perspective slope (xy divided
+    by −z), so it no longer collapses at grazing angles; magnitude still
+    ignores the focal length and remains tuned by `refraction_strength`.
+  - `opacity` participates as `1 − opacity × (1 − transmission)`, the shape
+    the engine reaches with `ref_amount = 1.0 - albedo.a`.
+
+  Glass now renders as a lens — see the refraction render test, which measures
+  the background actually moving — and the transmission no longer needs the
+  0.15 alpha floor on this path.
+
+- **The custom light node built the dielectric F0 from the wrong quantity.**
+  A light function has no built-in for the material's SPECULAR port
+  (`SPECULAR_AMOUNT` is the *light's* specular), and the node computed
+  `0.16 × SPECULAR_AMOUNT²` — F0 0.16 regardless of the material, four times
+  too reflective for a standard dielectric. The node now takes the port value
+  as an input, fed through the same uniform the fragment's SPECULAR port reads
+  (a `ParameterRef` shares the uniform without redeclaring it), or through the
+  same chain re-emitted in the light stage for a graph-driven specular.
+
+- **f90 was computed from one channel.** Godot clamps
+  `dot(f0, vec3(50.0 × 0.33))` — the channel *sum*; the node used only `f0.g`,
+  which dimmed the Fresnel peak on dielectrics by up to a third.
+
+- **The custom light node's backlight term was Godot 3's formula.** Godot 4
+  adds `(1/π − diffuse_brdf_NL) × backlight`; the node had the wrap-lighting
+  form from the previous engine. Dead code today (nothing writes BACKLIGHT),
+  corrected to keep the transcription honest.
+
+### Changed
+
+- **`sheen` on the custom-lighting path is now MaterialX's actual sheen lobe**
+  (Imageworks, `mx_microfacet_sheen.glsl`, verbatim), replacing the
+  `sheen → RIM` approximation for materials the light node takes over: weight,
+  `sheen_roughness` and `sheen_color` feed the node, and the base diffuse is
+  dimmed by the lobe's directional albedo the way MaterialX's `<layer>` stacks
+  it. The RIM fallback remains for materials without `diffuse_roughness`, and
+  its README entry now records what it looked like: Godot's rim paints a wide
+  white ring around every face of a dark fabric — the other half of the
+  "black hole" reports.
+
+  The gate admits sheen materials when their inputs are representable in the
+  light stage (literals, uniforms, or node chains the stage can host) and
+  still refuses them otherwise; it has not got weaker.
+
+  On the corpus this takes `diffuse_roughness` from "dropped on 33 materials"
+  to "evaluated on 23", and `sheen_roughness` from dropped to used.
+
+- **The custom-lighting equivalence test now actually exercises the node.**
+  Writing the sigma-0 variant to exactly 0.0 made the gate refuse the material,
+  so both renders were Godot's own lighting and the delta was zero by
+  construction — which is how the F0 bug above survived. The variant is now
+  written at 0.0001 (within 1e-7 of Lambert, but non-default), and a second,
+  specular-sensitive comparison (a dielectric with a broad, centred highlight)
+  asserts the dielectric directly. With the fixes, both lobes measure below
+  the test's quantisation floor; reintroducing the old F0 measures +0.089.
+
+- The demo environment's sun disk shrank from 45° to 8°. A sun that broad read
+  as a halo around anything in front of it, which is what the README preview
+  showed.
+
+- Corpus and gate tests accept the library directory after `--`, as the README
+  always claimed they did. The hero shot finds the repo and the demo relative
+  to its own script instead of a stale mount path, and takes `--out=`.
+
+### Fixed (test infrastructure)
+
+- `_fop` connected every operand from output port 0, ignoring the port a Ref2
+  carried. The refraction mask read `FRAGCOORD.x` where `FRAGCOORD.z` was
+  meant and closed everywhere; anything else feeding a non-zero port (an
+  expanded texture channel, a decompose output) silently took the wrong one.
+- Parameters shared across stages are now declared once, by an owner, and
+  referenced elsewhere through `ParameterRef` — two `Parameter` nodes with one
+  name emit two `uniform` declarations and fail to compile.
+- Every input of the custom light node is wired explicitly, because a
+  script-constructed `VisualShaderNodeCustom` never gets its port defaults
+  filled in and an unconnected input compiles to an empty expression.
+
+### Added (unreleased, 1.4.1)
+
+- **The batch converter now refuses to save a shader that does not compile.**
+  An update cycle where the editor kept running an older copy of the addon
+  scripts (the editor caches scripts until the project reloads) once wrote 22
+  `.tres` whose embedded light node had unwired inputs ("`max(, 0.0)`"); the
+  materials then failed to compile and the mech scene rendered the sky through
+  their surfaces as glowing white blotches. Two guards now exist: the emitter
+  verifies its light-stage wiring after building and falls back to Godot's own
+  lighting with a report note, and the dock checks the generated code for the
+  failure signature before saving. If the dock ever reports *stale addon
+  scripts*, reload the project and reconvert.
+- Headless conversions (outside the editor) do not get the editor's
+  UID-for-path callback, so an overwritten `.tres` gets a fresh `uid://` even
+  though scenes may reference the old one. If you convert from a script,
+  re-check the `.tres` headers or let the editor rescan.
+
 ## [1.3.0] — 2026-09-30
 
 ### Removed

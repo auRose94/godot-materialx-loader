@@ -51,18 +51,19 @@ All optional; the defaults work with no configuration.
 | Setting | Default | Meaning |
 |---|---|---|
 | `materialx/texture_roots` | `[]` | Extra directories to search for textures, tried before the `.mtlx`'s own directory. Leave empty for relative-to-source resolution. |
-| `materialx/custom_lighting` | `true` | Evaluate `diffuse_roughness` with an Oren-Nayar lobe. On by default because the lobe is MaterialX's own answer and Godot has no equivalent; turning it off falls back to Godot's Lambert. See [Oren-Nayar diffuse](#oren-nayar-diffuse) for what this costs. |
+| `materialx/custom_lighting` | `true` | Evaluate `diffuse_roughness` with an Oren-Nayar lobe — and `sheen` with MaterialX's actual sheen lobe — inside a custom light function. On by default because those lobes are MaterialX's own answer and Godot has no equivalent; turning it off falls back to Godot's Lambert and rim. See [Oren-Nayar diffuse](#oren-nayar-diffuse) for what this costs. |
+| `materialx/screen_space_refraction` | `false` | Render `transmission` as real refraction of the scene behind the surface, instead of fading it out with `ALPHA`. The surface joins the transparent pass, dims itself by the amount of background it shows, and the displaced sample is masked against the depth buffer. Tunables per material: `refraction_strength` (offset size) and `refraction_softness` (mask blend width). |
 
 Materials with a non-zero `diffuse_roughness` have Godot's whole lighting model
 replaced in the light stage, so for those the addon, not the engine, is
 responsible for the result. If you would rather have Godot's own BRDF, that
 setting is the escape hatch.
 
-| `materialx/screen_space_refraction` | `false` | Render `transmission` as real refraction of the scene behind the surface, instead of fading it out with `ALPHA`. Off by default until it has been looked at. |
-
-This was `materialx/experimental_custom_lighting` and defaulted to off before
-1.1.0. An existing value is migrated on first load, so upgrading never silently
-changes how your materials render.
+`materialx/custom_lighting` was `materialx/experimental_custom_lighting` and
+defaulted to off before 1.1.0. An existing value is migrated on first load, so
+upgrading never silently changes how your materials render. Dead keys from
+removed features (`auto_bake_previews`, `preview_size`, the old lighting key)
+are dropped from `project.godot` on first load.
 
 ## Using the dock
 
@@ -111,19 +112,43 @@ Give the project an environment (`Project → Project Settings → Rendering →
 Environment → Default Environment`). Any sky or IBL works; the demo project
 ships one.
 
+## Bright white gloss that only shows in the editor
+
+If converted metals bloom into radioactive-looking white patches on their
+undersides and edges in the editor but render normally at runtime, the light
+doing it is the scene's own: a directional light set to **Only baked**
+(`light_bake_mode = 1`) lights the editor viewport for preview, while a mesh
+without lightmap data ignores it in a running game. Check the imported scene's
+lights before suspecting the conversion. Blender-imported lamps also map
+wattage straight to `light_energy`, so a kilowatt lamp lands at a very high
+energy — sanity-check any OmniLight3D that imports with energy far above 1.0.
+
+Three knobs, all project-level, none related to this addon:
+
+- **Environment → Glow → HDR Threshold** (default 1.0) — raise it (e.g. 1.5–2.0)
+  so only true HDR sources bloom, not the polished gloss of a bright horizon.
+- **Environment → Glow → Strength** — scale bloom back (e.g. 0.6).
+- The plates' own `specular_roughness` in the source `.blend` — a near-zero
+  value is what turns sunglare into a disk; authored polish is physics, not a
+  bug, and the converter reproduces it on purpose.
+
 ## Oren-Nayar diffuse
 
 Godot's spatial BRDF has no Oren-Nayar diffuse, so a MaterialX material with a
 non-zero `diffuse_roughness` would be rendered with Lambert and quietly lose the
 roughness the file asked for. This addon evaluates the lobe instead, by
 transcribing Godot's lighting into a light function with the Oren-Nayar term in
-place of Lambert.
+place of Lambert. The same node carries MaterialX's *sheen* lobe
+(Imageworks, `mx_microfacet_sheen.glsl`, verbatim) for materials it takes over,
+so a dark fabric keeps its velvet response instead of Godot's white rim — and
+its base diffuse is dimmed by the sheen's directional albedo, the way
+MaterialX's `<layer>` stacks it.
 
 The transcription is Godot's, not a reimplementation: `D_GGX`, `V_GGX`,
 `SchlickFresnel`, the energy-compensation term and the backlight lobe are taken
 from `scene_forward_lights_inc.glsl` and `scene_forward_clustered.glsl`, so the
-material still tracks the engine when the engine changes. The only substituted
-term is
+material still tracks the engine when the engine changes. The substituted terms
+are
 
 ```glsl
 float sigma2 = mx_square(diffuse_roughness);
@@ -133,15 +158,21 @@ diffuse_brdf_NL = (A + B * stinv) * NdotL / M_PI;
 ```
 
 which is MaterialX's `mx_oren_nayar_diffuse` verbatim
-(`mx_microfacet_diffuse.glsl:8`).
+(`mx_microfacet_diffuse.glsl:8`). The dielectric F0 comes from the material's
+SPECULAR port through a shared uniform, exactly as `F0(metallic, specular,
+albedo)` consumes it on Godot's own path; the only knowingly approximate piece
+is the DFG energy-compensation term, which a light function cannot sample and
+which is therefore taken from Filament's analytic fit of the same quantity —
+verified against the engine's own integration, and now indistinguishable from
+the texture at the test's quantisation floor.
 
 Two consequences worth knowing:
 
 - **The material's lighting comes from this addon, not from Godot.** Writing to
   the light stage sets `LIGHT_CODE_USED`, which makes the engine skip its entire
   lighting model (`scene_forward_lights_inc.glsl:121`). Anything the
-  transcription does not cover disappears without an error, which is why the gate
-  in [Known limitations](#known-limitations) refuses a material with lobes a
+  transcription does not cover disappears without an error, which is why the
+  gate in [Known limitations](#known-limitations) refuses a material with lobes a
   light function cannot read rather than rendering half of it.
 - **Ambient is not darkened to match.** MaterialX scales indirect diffuse by the
   directional albedo; Godot computes ambient in the fragment stage, where the
@@ -171,22 +202,23 @@ reported in the dock rather than silently approximated.
 
 | Input | Why it is dropped |
 |---|---|
-| `transmission`, `transmission_color`, `transmission_depth`, `transmission_scatter`, `transmission_dispersion` | With `materialx/screen_space_refraction` on, `transmission` displaces the background along the refracted vector. Two approximations remain: only the `xy` of the view-space refracted direction is used, so it drifts at grazing angles, and the sample is not depth-masked, so a silhouette can pull in background from behind the object. With it off, `transmission` becomes `ALPHA` (`max(1 - transmission, 0.15)`), which shows the background without displacing it. |
+| `transmission_depth`, `transmission_scatter`, `transmission_dispersion` | With `materialx/screen_space_refraction` on, `transmission` refracts the screen texture: the surface joins the transparent pass, dims itself by the amount of background it shows, and the displaced sample is depth-masked, blurred by roughness, and tinted by `transmission_color`. The offset follows the refracted ray's perspective slope; its magnitude ignores the focal length and is tuned by the `refraction_strength` parameter, with the mask blend width on `refraction_softness`. Volume absorption (depth, scatter) has no screen-space equivalent. Transparent objects behind the glass are not in the screen copy, so they do not show through it. With the setting off, `transmission` becomes `ALPHA` (`max(1 - transmission, 0.15)`), which shows the background without displacing it. |
 | `diffuse_roughness`, when computed rather than written as a literal | Oren-Nayar can only be evaluated in the light stage, and a value computed in a nodegraph has to be a constant there. It is dropped, and the material keeps Godot's Lambert. Set the value directly and it works. |
 | The *indirect* half of Oren-Nayar | MaterialX also scales ambient diffuse by the directional albedo (`mx_oren_nayar_diffuse_bsdf.glsl:34`). Godot computes ambient in the fragment stage, outside the light function, so a material with a high `diffuse_roughness` keeps an ambient term that is not darkened to match its direct light. Affects only materials the setting actually reaches. |
-| A `diffuse_roughness` material that also has `coat`, `sheen`, anisotropy or a linked roughness | Those lobes are not readable from a light function at all, so the material keeps Godot's whole lighting rather than half of it. Reported in the dock when it happens. |
+| `diffuse_roughness` material that also has `coat` or anisotropy | Those lobes are not readable from a light function at all, so the material keeps Godot's whole lighting rather than half of it. Reported in the dock when it happens. A `sheen` material is *not* refused: the light node carries MaterialX's sheen lobe, provided the sheen inputs are representable in the light stage (literals, uniforms, or node chains it can host) — otherwise the material is refused too. |
 | `subsurface_color`, `subsurface_radius`, `subsurface_scale`, `subsurface_anisotropy` | Godot's scattering is driven by a single strength. `SSS_TRANSMITTANCE_COLOR`, `_DEPTH` and `_BOOST` are registered as fragment built-ins but are not writable output ports, so a material cannot say what colour its scatter is or how far it travels. The `subsurface` weight itself does work and reaches `SSS_STRENGTH`. |
 | `coat_color` | Godot's clearcoat has no tint port. |
 | `coat_IOR` | Godot hardcodes the coat IOR at 1.5. |
 | `sheen_roughness` | Godot's rim has no roughness term; its exponent comes from the surface roughness instead. |
 
 Deliberately approximated rather than dropped, because a partial match beats
-nothing:
+nothing — these apply to materials *without* `diffuse_roughness`; on the
+custom-lighting path sheen is the real lobe:
 
 | Input | How it is approximated |
 |---|---|
-| `sheen` | Mapped to Godot's `RIM`. Both are grazing-angle lobes, so it is a close analogue, not an identity: MaterialX's sheen is retroreflective and roughness-dependent, Godot's rim is fresnel-weighted with an exponent taken from the surface roughness. |
-| `sheen_color` | Mapped to `RIM_TINT`, which is a scalar (`mix(white, albedo, rim_tint)`). The colour is reduced to "how far from white", i.e. one minus its Rec.709 luminance, so white — the MaterialX default — is a no-op. Hue is lost: two sheens of equal brightness land on the same tint. |
+| `sheen` | Mapped to Godot's `RIM`. Both are grazing-angle lobes, so it is a close analogue, not an identity: MaterialX's sheen is retroreflective and roughness-dependent, Godot's rim is fresnel-weighted with an exponent taken from the surface roughness. On a dark fabric the rim reads as a wide white ring around every face of the mesh — the correct lobe, on the custom-lighting path, is the fix for that. |
+| `sheen_color` | Mapped to `RIM_TINT`, which is a scalar (`mix(white, albedo, rim_tint)`). The colour is reduced to "how far from white", i.e. one minus its Rec.709 luminance, so white — the MaterialX default — is a no-op. Hue is lost: two sheens of equal brightness land on the same tint. On the custom-lighting path `sheen_color` feeds the real lobe instead, and no approximation happens. |
 
 Other limits:
 

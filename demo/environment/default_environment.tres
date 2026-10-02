@@ -6,8 +6,11 @@ sky_horizon_color = Color(0.52, 0.53, 0.55, 1)
 ground_bottom_color = Color(0.2, 0.2, 0.21, 1)
 ground_horizon_color = Color(0.42, 0.42, 0.43, 1)
 ground_curve = 0.06
-sun_angle_max = 45.0
-sun_curve = 0.12
+# A realistic sun disk. At 45 degrees the sun's glow filled a sixth of the sky,
+# which read as a halo around anything that happened to stand in front of it --
+# a black sphere centred on the sun looked like a black hole with a disk.
+sun_angle_max = 8.0
+sun_curve = 0.08
 
 [sub_resource type="Sky" id="Sky_5vyg5"]
 sky_material = SubResource("ProceduralSkyMaterial_pnncl")

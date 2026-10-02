@@ -6,7 +6,11 @@ extends SceneTree
 
 const Emitter := preload("res://addons/materialx/mtlx_emitter.gd")
 
-const DIR := "res://materials"
+## The directory to scan. Defaults to this project's res://materials; another
+## library can be checked without editing by passing it after `--`:
+##   godot --headless --script tests/mtlx_corpus_check.gd -- res://path/to/materials
+## (The README has always claimed this; the argument was never actually read.)
+const DEFAULT_DIR := "res://materials"
 
 var _ok := 0
 var _failed: Array = []
@@ -23,8 +27,10 @@ var _constant_normals := 0
 func _init() -> void:
 	# Refraction on, so the whole corpus is checked through the new path.
 	ProjectSettings.set_setting("materialx/screen_space_refraction", true)
-	var files := _list(DIR)
-	print("converting %d file(s) from %s\n" % [files.size(), DIR])
+	var user_args := OS.get_cmdline_user_args()
+	var dir: String = user_args[0] if user_args.size() > 0 else DEFAULT_DIR
+	var files := _list(dir)
+	print("converting %d file(s) from %s\n" % [files.size(), dir])
 
 	for path in files:
 		_convert(path)

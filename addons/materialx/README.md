@@ -92,8 +92,10 @@ headless Godot uses the dummy renderer, whose SubViewport has no framebuffer.
 default. Godot's spatial shader has no refraction lobe, so nothing was wired and
 glass came out solid.
 
-Alpha is the only way to make it see-through, so transmission is folded into
-`ALPHA` as `1 - transmission`. Two details:
+Two paths now exist, chosen by `materialx/screen_space_refraction`.
+
+**Off (default):** transmission folds into `ALPHA` as `1 - transmission`. Two
+details:
 
 * MaterialX reduces `opacity` to its **luminance** before using it (`luminance`
   then `extract` in `libraries/bxdf/standard_surface.mtlx`), so the converter
@@ -102,6 +104,36 @@ Alpha is the only way to make it see-through, so transmission is folded into
   invisible. Since Godot cannot refract, `TRANSMISSION_ALPHA_FLOOR = 0.15` keeps
   specular highlights visible, which is what sells it as glass. That constant is
   an approximation, not physics.
+
+**On:** the surface refracts the screen texture, following the recipe of Godot's
+own `BaseMaterial3D` refraction (`material.cpp`, FEATURE_REFRACTION):
+
+* `ALPHA = 1.0` is written unconditionally — the engine's comment is "Force
+  transparency on the material (required for refraction)". Writing ALPHA moves
+  the material to the transparent pass, which renders *after* the screen copy,
+  so the copy no longer contains the object. The first version of this path
+  stayed opaque, sampled the previous frame's copy of itself, and compounded
+  that into a black disc with a glowing ring — a black hole with an accretion
+  disk.
+* The surface dims by the amount of background it shows
+  (`ALBEDO *= 1 - background_w`, with `background_w = 1 - opacity ×
+  (1 - transmission)`), and the sample is added to EMISSION. Stacking a fully
+  lit surface and a full background sample was the halo.
+* The displaced UV is masked against the depth buffer, blended over
+  `refraction_softness` raw window-depth units, so a foreground object crossing
+  the sample does not pop in as background. Godot 4.3+ uses a reversed-Z depth
+  buffer in every renderer, so "farther than me" is a *smaller* raw value — the
+  comparison is fragment depth minus sample depth. Getting this backwards
+  closes the mask everywhere and the strength knob does nothing, which is how
+  the test caught it.
+* The screen sample is blurred by roughness (`textureLod`, ROUGHNESS × 8) —
+  frosted glass, engine parity.
+* The offset follows the refracted ray's perspective slope (xy over −z), so it
+  survives grazing angles; magnitude ignores the focal length and is tuned by
+  the `refraction_strength` parameter.
+* The engine multiplies the sample by `EXPOSURE` (the scene's emissive exposure
+  normalisation reaches everything else the fragment adds); the node graph reads
+  the same built-in.
 
 Affects `Glass.mtlx` and `Semitransparent_Silicone.mtlx`. `Chains.mtlx` and
 `Perforated_Metal.mtlx` instead use an opacity mask.
@@ -245,11 +277,11 @@ Current state across the 277 files:
 
 | input | materials | why |
 |---|---|---|
-| `diffuse_roughness` | 33 | feeds MaterialX's Oren-Nayar diffuse lobe only; Godot has no diffuse-roughness port |
+| `diffuse_roughness` | 10 (was 33) | feeds MaterialX's Oren-Nayar diffuse lobe, which the custom light node evaluates on 23 materials; the rest are refused by the gate (coat, anisotropy, or a computed value) |
 | `subsurface_color` | 17 | Godot's SSS takes radius/depth, not a colour |
 | `subsurface_radius` / `_scale` | 8 / 8 | Godot's SSS radius is per-object |
-| `transmission*` | 1–2 | no refraction lobe; `transmission` itself now feeds ALPHA |
-| `sheen*` | 1 | no sheen lobe |
+| `transmission_depth` / `_scatter` | 2 / 2 | no volume absorption in screen-space refraction |
+| `sheen_roughness` | 0 on the custom path (the node takes it); 1 otherwise | Godot's rim has no roughness term |
 | `coat_color` | 2 | Godot's clearcoat has no tint |
 | `specular_rotation` | 2 | no anisotropy rotation on the output |
 | `opacity` | 2 | wiring `ALPHA` would make every material transparent |
@@ -307,20 +339,33 @@ bare integers, never as `ALBEDO`/`ROUGHNESS` names.
 
 ## Tests
 
-Run from the project root with `godot-mono --headless --script <file>`:
+Run from the `demo/` project — the scripts preload each other through
+`res://tests/`, so that is the project they must run in. A library in another
+project can be checked without editing by passing its directory after `--` (an
+absolute path works for conversion; rendering needs a GPU, see below):
+
+```bash
+cd demo
+godot-mono --headless --script tests/mtlx_corpus_check.gd -- /path/to/library
+```
 
 | script | checks |
 |---|---|
-| `tools/mtlx_loader_check.gd` | `.mtlx` loads as a `VisualShader` |
-| `tools/mtlx_mix_check.gd` | `mix` fg/bg polarity (the blue-brick bug) |
-| `tools/mtlx_specular_check.gd` | specular conversion against each file's declared IOR |
-| `tools/mtlx_corpus_check.gd` | all 277 files; dangling connections, missing textures, drops |
-| `tools/mtlx_fixer_check.gd` | import repair (dry run is side-effect free), save/load round trip |
-| `tools/mtlx_dock_layout_check.gd` | dock minimum size, scrollability, preview visibility |
-| `tools/mtlx_live_check.gd` | renders the live preview (needs a real GPU; see below) |
-| `tools/mtlx_check.gd` | small sample, per-material detail |
-| `tools/mtlx_trace.gd` | one material's graph + generated code (`-- res://materials/X.mtlx`) |
-| `tools/mtlx_preview.gd` | prints the generated shader code and `.tres` |
+| `tests/mtlx_loader_check.gd` | `.mtlx` loads as a `VisualShader` |
+| `tests/mtlx_mix_check.gd` | `mix` fg/bg polarity (the blue-brick bug) |
+| `tests/mtlx_specular_check.gd` | specular conversion against each file's declared IOR |
+| `tests/mtlx_corpus_check.gd` | whole library; dangling connections, missing textures, drops |
+| `tests/mtlx_refraction_check.gd` | the refraction graph: screen + depth samplers, the ALPHA pass trick, the mask |
+| `tests/mtlx_refraction_render.gd` | the background actually moves with `refraction_strength` (needs a GPU) |
+| `tests/mtlx_light_gate_check.gd` | what the custom-lighting gate admits and refuses |
+| `tests/mtlx_light_path_check.gd` | sigma≈0 equivalence against Godot's lighting, plus a specular-sensitive dielectric (needs a GPU) |
+| `tests/mtlx_light_equiv_check.gd` | diffuse/specular error of the custom node, lobes separated by albedo differencing (needs a GPU) |
+| `tests/mtlx_material_export_check.gd` | the written `.tres` round-trips as a ShaderMaterial with its graph intact |
+| `tests/mtlx_fixer_check.gd` | import repair (dry run is side-effect free), save/load round trip |
+| `tests/mtlx_dock_layout_check.gd` | dock minimum size, scrollability, preview visibility |
+| `tests/mtlx_live_check.gd` | renders the live preview (needs a real GPU; see below) |
+| `tests/mtlx_trace.gd` | one material's graph + generated code (`-- res://materials/X.mtlx`) |
+| `tests/mtlx_hero_shot.gd` | renders the README contact sheet to `docs/preview.png` |
 
 Current status: **277/277 convert, 0 shader errors, 0 dangling connections, 0
 missing textures.**

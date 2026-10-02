@@ -34,3 +34,6 @@ Thumbs.db
 # file back here. It belongs to that project, not to this repository, whose root
 # is deliberately not a Godot project.
 addons/materialx/*.import
+
+# hero shot staging: Grid_Paint is copied here before the contact sheet renders
+demo/hero_staging/

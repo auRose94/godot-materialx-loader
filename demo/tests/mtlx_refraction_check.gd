@@ -2,11 +2,15 @@ extends SceneTree
 
 ## Checks screen-space refraction end to end.
 ##
-## Two things have to hold. The generated shader must actually contain a screen
+## Three things have to hold. The generated shader must actually contain a screen
 ## sampler and a refract call -- a graph that silently fails to wire produces a
 ## shader that compiles and shows nothing, which is the same failure mode as every
-## other silent conversion bug. And a material with transmission must stop being
-## folded into ALPHA, or the background shows twice.
+## other silent conversion bug. The depth texture must be sampled, so the
+## displaced UV can be masked against whatever the sample lands on. And ALPHA
+## must be written as 1.0, which is what moves the material into the transparent
+## pass, after the screen copy: the previous version stayed opaque, sampled the
+## previous frame's copy of itself, and compounded that into a black disc with a
+## glowing ring.
 ##
 ## Glass.mtlx is the subject: transmission = 1, which used to produce ALPHA = 0.15
 ## and a uniformly faded shell.
@@ -42,17 +46,25 @@ func _init() -> void:
 	var on := Emitter.build_file(GLASS, PackedStringArray(["res://materials"]))
 	_expect(on.ok, "Glass builds with refraction on")
 	var code: String = on.shader.code
-	print("\n  on: screen sampler=%s  refract=%s" % [
+	print("\n  on: screen sampler=%s  refract=%s  depth=%s" % [
 		code.find("hint_screen_texture") >= 0,
-		code.find("refract(") >= 0])
+		code.find("refract(") >= 0,
+		code.find("hint_depth_texture") >= 0])
 
 	_expect(code.find("hint_screen_texture") >= 0,
 		"on: the screen texture uniform is declared")
 	_expect(code.find("refract(") >= 0, "on: refract() is called")
-	_expect(not _alpha_written(code),
-		"on: transmission no longer becomes ALPHA, so the background is not "
-		+ "shown twice")
+	_expect(code.find("hint_depth_texture") >= 0,
+		"on: the depth texture is sampled, so the displaced UV can be masked")
+	_expect(_alpha_written(code),
+		"on: ALPHA = 1.0 is written, which is what moves the material to the "
+		+ "transparent pass -- after the screen copy, so it can no longer "
+		+ "sample its own previous frame (the black-hole feedback)")
+	_expect(code.find("FRAGCOORD") >= 0 or code.find("n_out") >= 0,
+		"on: the fragment stage builds the mask")
 	_expect(code.find("EMISSION") >= 0, "on: the sample reaches EMISSION")
+	_expect(code.find("mix(") >= 0,
+		"on: the displaced and undisplaced UVs are blended by the depth mask")
 
 	# An opaque material must be untouched -- refraction is only for transmission.
 	ProjectSettings.set_setting(FLAG, true)
@@ -66,6 +78,8 @@ func _init() -> void:
 	# The strength parameter is what a user tunes, so it must be reachable.
 	_expect(code.find("refraction_strength") >= 0,
 		"the refraction strength is exposed as a shader parameter")
+	_expect(code.find("refraction_softness") >= 0,
+		"the depth-mask blend width is exposed as a shader parameter")
 
 	if had:
 		ProjectSettings.set_setting(FLAG, saved)
