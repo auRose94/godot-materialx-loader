@@ -66,12 +66,24 @@ func _init() -> void:
 	_expect(code.find("mix(") >= 0,
 		"on: the displaced and undisplaced UVs are blended by the depth mask")
 
+	# ALPHA=1.0 is transparency, so the transparency render modes follow --
+	# except for the prepass: a reading surface that joined the opaque list
+	# would rasterise into the screen copy and then refraction-sample itself,
+	# so cull_disabled is kept but depth_prepass_alpha is not.
+	var mode_line: String = _render_mode_line(code)
+	_expect(mode_line.contains("cull_disabled"),
+		"on: cull_disabled joins the render_mode -> %s" % mode_line)
+	_expect(mode_line.find("depth_prepass_alpha") < 0,
+		"on: the screen reader keeps no depth_prepass_alpha")
+
 	# An opaque material must be untouched -- refraction is only for transmission.
 	ProjectSettings.set_setting(FLAG, true)
 	var gold := Emitter.build_file(OPAQUE, PackedStringArray(["res://materials"]))
 	_expect(gold.ok, "Gold builds with refraction on")
 	_expect(gold.shader.code.find("hint_screen_texture") < 0,
 		"an opaque material gains no screen sampler")
+	_expect(_render_mode_line(gold.shader.code).contains("cull_back"),
+		"an opaque material keeps the default cull mode")
 	_expect(not gold.shader.code.contains("ERROR"),
 		"no shader emits a compile error")
 
@@ -98,6 +110,13 @@ func _init() -> void:
 ## "0.150000", which is a trap worth not falling into twice.
 func _alpha_written(code: String) -> bool:
 	return code.find("ALPHA =") >= 0
+
+
+func _render_mode_line(code: String) -> String:
+	for line in code.split("\n"):
+		if line.begins_with("render_mode"):
+			return line.strip_edges()
+	return ""
 
 
 func _expect(cond: bool, what: String) -> bool:

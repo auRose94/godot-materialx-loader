@@ -99,6 +99,13 @@ var _consumed_by_features: Dictionary = {}
 var _custom_light_wired: bool = false
 ## True when the sheen lobe went to the light node rather than Godot's RIM.
 var _sheen_wired_light: bool = false
+## True when anything was connected to the fragment ALPHA port. Decides the
+## transparent render modes -- see _apply_transparency_render_modes.
+var _alpha_written: bool = false
+## True when the material reads a screen-buffer texture (the refraction path's
+## screen and depth samplers). Such a transparent surface keeps cull_disabled
+## but no depth prepass -- see _apply_transparency_render_modes.
+var _screen_reader: bool = false
 ## The brightest-channel collapse of specular_color, shared by the fragment
 ## fold and the light-stage fold so its note is emitted once.
 var _specular_col_scale: float = 1.0
@@ -142,6 +149,7 @@ func _run(doc: MtlxDocument, path: String, texture_roots: PackedStringArray) -> 
 	_shader.mode = Shader.MODE_SPATIAL
 
 	_emit_surface(surface)
+	_apply_transparency_render_modes()
 	_apply_layout()
 
 	if _shader.get_node_list(FRAGMENT).is_empty():
@@ -155,6 +163,62 @@ func _run(doc: MtlxDocument, path: String, texture_roots: PackedStringArray) -> 
 	r.missing_textures = _missing_textures
 	r.notes.append_array(doc.warnings)
 	return r
+
+
+## Render modes for a material that writes ALPHA.
+##
+## * `cull_disabled`: back faces render. A closed glass shell seen from inside a
+##   cockpit is otherwise invisible behind its own front wall, and a refracted
+##   ray that turns back onto the surface sees only half of it. MaterialX's
+##   standard_surface does not cull; both sides are shaded.
+##
+## * `depth_prepass_alpha`: transparent materials otherwise do not join the
+##   shadow and depth passes at all. `casts_shadows()` treats any ALPHA as
+##   shadowless
+##   (scene_shader_forward_clustered.cpp:249-260, and again at
+##   drivers/gles3/storage/material_storage.cpp:3222 for Compatibility), and
+##   both renderers restore casting with `depth_prepass_alpha`
+##   (`uses_depth_in_alpha_pass()`, scene_shader_forward_clustered.h:292).
+##   With it, the material renders into the depth pass and both shadow passes,
+##   discarding fragments below the opaque-prepass threshold -- 0.1 as the
+##   engine sets it in the shadow passes (render_forward_clustered.cpp:2818) --
+##   so solid ALPHA casts a solid shadow and faded ALPHA an alpha-cut one.
+##
+## The prepass is withheld from a transparent surface that reads the screen or
+## depth buffer -- the refraction path. A surface carrying FLAG_PASS_DEPTH is
+## added to the OPAQUE render list as well as the alpha list, and Compatibility
+## has no colour-pass inclusion guard against a surface that is on both lists
+## (renderers/rd add one at render_forward_clustered.cpp:345, Compatibility
+## does not, rasterizer_scene_gles3.cpp:1481-1486): the surface rasterises
+## into the screen copy and then refraction-samples itself -- the black-hole
+## feedback pattern, measured as a black sphere with zero displacement. In
+## Forward+ the inclusion mask would spare it; because one .tres is rendered
+## by both, screen readers get no prepass on either. That is engine parity:
+## BaseMaterial3D's own refraction sets nothing but ALPHA = 1.0 either, and
+## casts no shadow in vanilla either.
+##
+## There is no VisualShader class API for render modes; the modes reach the
+## generated code through the dynamic `modes/<name>` (enum index) and
+## `flags/<name>` (bool) properties `VisualShader::_set` understands
+## (visual_shader.cpp:1729-1753). `cull` is an enumerated mode whose options
+## run back, front, disabled (shader_types.cpp:243), so index 2 is
+## `cull_disabled`; `depth_prepass_alpha` is an optionless mode, which the
+## code generator writes whenever it is in `flags`
+## (visual_shader.cpp:2737-2747). Both properties are listed in
+## `_get_property_list`, so a saved .tres keeps them.
+func _apply_transparency_render_modes() -> void:
+	if not _alpha_written:
+		return
+	_shader.set("modes/cull", 2)
+	if _screen_reader:
+		_notes.append(
+			"transparent material rendered double-sided; it reads the screen "
+			+ "buffer, so it keeps no depth prepass and casts no shadow")
+	else:
+		_shader.set("flags/depth_prepass_alpha", true)
+		_notes.append(
+			"transparent material rendered double-sided and shadow-casting; "
+			+ "the shadow is cut where ALPHA drops below 0.1")
 
 
 # ---------------------------------------------------------------------------
@@ -564,6 +628,7 @@ func _plan_screen_refraction(surface: MtlxDocument.MtlxElement) -> bool:
 	_consumed_by_features["transmission"] = true
 	_consumed_by_features["transmission_color"] = true
 	_consumed_by_features["opacity"] = true
+	_screen_reader = true  # _wire_screen_refraction samples screen AND depth
 	_refraction_transmission = transmission
 	_refraction_background_w = background_w
 	_refraction_surface_w = _fop(GodotMap.FOP_SUB, 1.0, background_w)
@@ -737,8 +802,7 @@ func _wire_screen_refraction(surface: MtlxDocument.MtlxElement) -> void:
 
 	_notes.append(
 		"transmission rendered as screen-space refraction; the surface joins "
-		+ "the transparent pass (and so no longer casts shadows without a "
-		+ "depth prepass), dimmed by the amount of background it shows")
+		+ "the transparent pass, dimmed by the amount of background it shows")
 
 
 ## Default strength of the screen-space offset, in SCREEN_UV units per unit of
@@ -2083,6 +2147,11 @@ func _connect_light(from: Ref2, from_port: int, to_node: int, to_port: int) -> v
 ## Wires into the implicit output node, whose ports are the ALBEDO/METALLIC/...
 ## indices in GodotMap.
 func _connect_output(from: Ref2, out_port: int) -> void:
+	if out_port == GodotMap.OUT_ALPHA:
+		# The only writers are _fold_opacity and _wire_screen_refraction, but
+		# the gateway is where the fact is caught: any future ALPHA writer
+		# makes the material transparent without touching this line.
+		_alpha_written = true
 	_connect(from, from.port, OUTPUT_NODE, out_port)
 
 

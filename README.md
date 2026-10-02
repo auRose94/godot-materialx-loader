@@ -56,6 +56,13 @@ All optional; the defaults work with no configuration.
 | `materialx/materials_folder` | `""` | The folder the dock's Source folder field starts on. Empty auto-detects a folder holding `.mtlx` files; the dock saves the field here when you commit it (Enter, or clicking elsewhere), so the next session reopens on your choice. Clearing the field returns to auto-detect. |
 | `materialx/export_path` | `""` | Where **Convert project to export folder** writes materials: every `.mtlx` in the project becomes a flat `<basename>.tres` here, however deep the source sits. Empty disables the conversion. Duplicate basenames get a numbered suffix (`Wall-2.tres`) in scan order, never an overwrite. `res://addons` and the export folder itself are never treated as sources. |
 
+Every material that ends up transparent (ALPHA is written, by `opacity`, by
+`transmission`, or by the refraction path) is converted double-sided
+(`cull_disabled`) so the back of a glass shell shades, and — unless the
+material reads the screen buffer for refraction — with `depth_prepass_alpha`,
+which returns the shadows the engine skips for ALPHA-writing materials
+(alpha-cut below 0.1 in the shadow passes).
+
 Materials with a non-zero `diffuse_roughness` have Godot's whole lighting model
 replaced in the light stage, so for those the addon, not the engine, is
 responsible for the result. If you would rather have Godot's own BRDF, that

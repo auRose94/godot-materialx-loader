@@ -150,6 +150,30 @@ own `BaseMaterial3D` refraction (`material.cpp`, FEATURE_REFRACTION):
 Affects `Glass.mtlx` and `Semitransparent_Silicone.mtlx`. `Chains.mtlx` and
 `Perforated_Metal.mtlx` instead use an opacity mask.
 
+**Both paths end in a written ALPHA, so both carry the same transparency render
+modes** — written onto the VisualShader, which has no class API for them; they
+reach the generated `render_mode` line through the dynamic `modes/` and
+`flags/` properties the engine's property list exposes, and a saved .tres keeps
+them:
+
+* `cull_disabled` — Godot shades front faces only. A closed glass shell seen
+  from inside a cockpit is then invisible behind its own front wall, and a
+  refracted ray that turns back onto the surface sees half of it. MaterialX's
+  standard_surface does not cull.
+* `depth_prepass_alpha` — the engine's `casts_shadows()` marks any
+  ALPHA-writing material shadowless and skips it in the shadow and depth passes
+  entirely (`scene_shader_forward_clustered.cpp`, the same formula in
+  Compatibility's material storage). With the prepass the surface joins both
+  shadow passes and the depth pass, and the shadow is cut where ALPHA drops
+  below 0.1 — the shadow-pass value of the engine's opaque-prepass threshold.
+* Except that a surface which reads the screen or depth buffer — the refraction
+  path — keeps **no** prepass: a depth-flagged surface is listed for both the
+  opaque and the alpha pass, Forward+ guards against drawing a surface of both
+  lists in one colour pass and Compatibility does not, so the glass would
+  rasterise into the screen copy and then refraction-sample itself — the black
+  hole again. One .tres is rendered by both pipelines, so the refraction glass
+  casts no shadow, like the engine's own `BaseMaterial3D` refraction.
+
 ### 2. Specular reflectance was 4x too strong on 254 of 277 materials
 
 MaterialX `standard_surface` builds its dielectric from a **physical IOR**:

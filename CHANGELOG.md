@@ -7,6 +7,23 @@ the project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [1.4.0] — 2026-10-01
 
+### Added
+
+- **Transparent materials render both faces and cast shadows.** Every
+  material whose conversion writes ALPHA now carries `cull_disabled`, and
+  `depth_prepass_alpha` as well — unless the material reads the screen buffer
+  for refraction — so the back wall of a shell shades and the shadow the
+  engine used to skip for any ALPHA-writing material returns, cut where ALPHA
+  drops below 0.1 in the shadow passes. The render modes reach the shader
+  through VisualShader's dynamic `modes/`/`flags/` properties (no class API
+  exists) and survive the .tres round trip. On the corpus, `Chains` and
+  `Perforated_Metal` gain the shadows; the two refraction materials (`Glass`,
+  `Semitransparent_Silicone`) keep `cull_disabled` only, because they also
+  join the opaque pass there and Compatibility has no colour-pass guard for a
+  surface on both lists — a prepass made the glass rasterise into its own
+  screen sample, the black hole again. The engine's own refraction casts no
+  shadow either.
+
 ### Fixed
 
 - **Screen-space refraction compounded its own output into a "black hole with a
