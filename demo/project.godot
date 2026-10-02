@@ -26,6 +26,9 @@ enabled=PackedStringArray("res://addons/materialx/plugin.cfg")
 
 texture_roots=PackedStringArray()
 screen_space_refraction=false
+custom_lighting=true
+materials_folder=""
+export_path=""
 
 [rendering]
 

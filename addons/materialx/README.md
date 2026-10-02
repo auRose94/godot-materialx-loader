@@ -31,14 +31,22 @@ nothing is written until you untick that.
   to each `.mtlx`, ready to drop on a mesh.
   This **overwrites** any existing conversion, so point the dock at a scratch
   folder first if you want to keep the old ones to diff against.
+* **Convert project to export folder** — converts *every* `.mtlx` in the
+  project into one flat folder (`Project Settings →
+  materialx/export_path`). Nothing is written next to the sources, the
+  FileSystem dock previews each converted `.tres` as a material ball, and the
+  export folder therefore browses as a library of finished materials.
+  Duplicate basenames get a numbered suffix rather than overwriting each
+  other.
 * **Repair texture imports** — fixes the `.import` settings of the textures the
   `.mtlx` files reference (see below).
 * **Live preview** — pick a material and see the *converted shader* rendered on a
   sphere. This is the accurate view; see below.
 
-The Source folder is remembered per project
-(`Project Settings → materialx/materials_folder`): the dock reopens on the last
-committed value, and an empty field means auto-detect again.
+The Source folder and Export folder are remembered per project
+(`Project Settings → materialx/materials_folder` and `materialx/export_path`):
+the dock reopens on the last committed value, and an empty field means
+auto-detect respectively a disabled conversion.
 
 ## Previews
 

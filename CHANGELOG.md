@@ -135,6 +135,18 @@ the project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   choose. Clearing the field returns the project to auto-detect, and a saved
   folder that no longer exists falls back to auto-detect rather than pointing
   the dock at nothing.
+- **Project-wide conversion into one export folder.** The per-folder converter
+  writes `.tres` next to each `.mtlx`, which scatters a converted library
+  across the source tree and mixes the two. *Convert project to export folder*
+  reads every `.mtlx` in the project — recursively, but never `res://addons`
+  and never the export folder itself — and writes them **flat** into
+  `materialx/export_path` as `<basename>.tres`: one folder of `ShaderMaterial`s
+  the FileSystem dock previews by itself, browsable without a single `.mtlx`
+  source mixed in. Duplicate basenames (two `Iron.mtlx` in different folders)
+  get a numbered suffix (`Iron-2.tres`) in sorted scan order rather than one
+  silently overwriting the other. Dry runs log the full source-to-target map
+  and write nothing; the export folder is its own per-project setting,
+  committed and saved like the source folder.
 
 ## [1.3.0] — 2026-09-30
 

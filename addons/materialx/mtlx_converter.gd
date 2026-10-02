@@ -21,11 +21,13 @@ var _status: RichTextLabel
 var _log: RichTextLabel
 var _convert_btn: Button
 var _fix_btn: Button
+var _project_btn: Button
 var _live: MtlxLivePreview
 var _live_picker: OptionButton
 var _custom_lighting: CheckBox
 var _live_paths: PackedStringArray = PackedStringArray()
 var _texture_roots: PackedStringArray = PackedStringArray()
+var _export: LineEdit
 var _dry_run := true
 
 
@@ -87,6 +89,32 @@ func _ready() -> void:
 	_fix_btn.text = "Repair texture imports"
 	_fix_btn.pressed.connect(_on_fix_imports)
 	body.add_child(_fix_btn)
+
+	# Project-wide conversion: every .mtlx in the project, written flat into
+	# one export folder. Keeping the output apart from the sources is what
+	# makes the folder browsable -- a ShaderMaterial previews itself as a
+	# material ball in the FileSystem dock, a .mtlx does not, and a folder of
+	# only converted materials is therefore the one place to scan by eye.
+	var export_sep := HSeparator.new()
+	body.add_child(export_sep)
+
+	var export_label := Label.new()
+	export_label.text = "Export folder (project-wide)"
+	body.add_child(export_label)
+
+	_export = LineEdit.new()
+	_export.text = Config.export_path()
+	# The field is empty for a project that has not chosen yet; the example
+	# makes the expected shape obvious without pretending it is saved.
+	_export.placeholder_text = "res://materials/converted"
+	_export.text_submitted.connect(_on_export_committed)
+	_export.focus_exited.connect(_on_export_committed)
+	body.add_child(_export)
+
+	_project_btn = Button.new()
+	_project_btn.text = "Convert project to export folder"
+	_project_btn.pressed.connect(_on_convert_project)
+	body.add_child(_project_btn)
 
 	_status = RichTextLabel.new()
 	_status.bbcode_enabled = true
@@ -202,16 +230,39 @@ func _populate_folder() -> void:
 ## Accepts an optional argument because text_submitted carries the field's text
 ## and focus_exited carries nothing; both arrive here for the same decision.
 func _on_folder_committed(_text: String = "") -> void:
-	var v := _folder.text.strip_edges()
-	# Trailing slashes are noise; a bare scheme such as res:// is not.
+	if _commit_setting(_folder, Config.MATERIALS_FOLDER):
+		# The live picker lists the .mtlx files of this folder, so follow it.
+		_populate_live_picker()
+
+
+## Same saving for the export folder; a changed value has no side effects
+## beyond the settings write, so it needs no follow-up here.
+func _on_export_committed(_text: String = "") -> void:
+	_commit_setting(_export, Config.EXPORT_PATH)
+
+
+## Saves a committed path field's value under `key`, shared by every path field
+## on the dock so they cannot drift apart on formatting. Returns true when the
+## stored value changed.
+##
+## Writes nothing when the value is unchanged, so rebuilding a dock never
+## touches project.godot. Clearing a field stores empty, which is whatever
+## auto/default meaning the setting gives it. Trailing slashes are noise; a
+## bare scheme such as res:// is not.
+func _commit_setting(field: LineEdit, key: String) -> bool:
+	var v := _trim_slashes(field.text.strip_edges())
+	if v == _trim_slashes(str(ProjectSettings.get_setting(key, ""))):
+		return false
+	ProjectSettings.set_setting(key, v)
+	ProjectSettings.save()
+	return true
+
+
+## Trailing slashes stripped, schemes kept.
+static func _trim_slashes(v: String) -> String:
 	while v.ends_with("/") and not v.ends_with("://"):
 		v = v.left(v.length() - 1)
-	if v == Config.materials_folder().strip_edges():
-		return
-	ProjectSettings.set_setting(Config.MATERIALS_FOLDER, v)
-	ProjectSettings.save()
-	# The live picker lists the .mtlx files of this folder, so follow it.
-	_populate_live_picker()
+	return v
 
 
 ## The folder to offer in the source field.
@@ -278,7 +329,7 @@ func _as_material(result: Emitter.Result) -> Resource:
 ## on disk (the editor caches scripts until the project reloads); the right
 ## response is to reload and reconvert, not to save a file every mesh will
 ## reject.
-func _convert_and_save(path: String, dry_run: bool) -> MtlxEmitter.Result:
+func _convert_and_save(path: String, out_path: String, dry_run: bool) -> MtlxEmitter.Result:
 	var result: MtlxEmitter.Result = Emitter.build_file(path)
 	if not result.ok:
 		_log.text += "[color=red]FAIL[/color] %s: %s\n" % [path.get_file(), result.message]
@@ -291,12 +342,21 @@ func _convert_and_save(path: String, dry_run: bool) -> MtlxEmitter.Result:
 			return null
 
 	if not dry_run:
-		var out_path: String = path.get_basename() + ".tres"
 		var err: Error = ResourceSaver.save(_as_material(result), out_path)
 		if err != OK:
 			_log.text += "[color=red]SAVE FAIL[/color] %s (err %d)\n" % [out_path, err]
 			return null
 	return result
+
+
+## Dropped inputs and missing textures, the two per-file findings a conversion
+## reports. Shared by both conversion scopes so they log identically.
+func _log_result(path: String, result: MtlxEmitter.Result) -> void:
+	for key in result.dropped.keys():
+		_log.text += "  [color=grey]%s: %s dropped (%s)[/color]\n" % [
+			path.get_file(), key, result.dropped[key]]
+	for t in result.missing_textures:
+		_log.text += "  [color=orange]%s: missing texture %s[/color]\n" % [path.get_file(), t]
 
 
 func _on_convert() -> void:
@@ -312,18 +372,14 @@ func _on_convert() -> void:
 	var dropped_total := 0
 
 	for path in files:
-		var result: MtlxEmitter.Result = _convert_and_save(path, _dry_run)
+		var result: MtlxEmitter.Result = _convert_and_save(
+			path, path.get_basename() + ".tres", _dry_run)
 		if result == null:
 			failed += 1
 			continue
 		written += 1
 		dropped_total += result.dropped.size()
-
-		for key in result.dropped.keys():
-			_log.text += "  [color=grey]%s: %s dropped (%s)[/color]\n" % [
-				path.get_file(), key, result.dropped[key]]
-		for t in result.missing_textures:
-			_log.text += "  [color=orange]%s: missing texture %s[/color]\n" % [path.get_file(), t]
+		_log_result(path, result)
 
 	var verb: String = "would convert" if _dry_run else "converted"
 	_status.text = "%s %d file(s), %d failed, %d dropped inputs." % [verb, written, failed, dropped_total]
@@ -331,7 +387,140 @@ func _on_convert() -> void:
 		_status.text += "\n[color=yellow]Preview only.[/color]"
 
 	if not _dry_run:
+		_rescan()
+
+
+## Converts every .mtlx in the project into one flat export folder.
+##
+## The per-folder converter writes next to each source, which scatters a
+## converted library across the source tree and mixes the two. This scope
+## instead reads recursively (but never res://addons, and never the export
+## folder itself) and writes <export>/<basename>.tres, so the export folder
+## becomes a single browsable library of materials the FileSystem dock
+## previews by itself while the sources stay where they are.
+##
+## Refuses to run with an empty export folder rather than guessing where
+## hundreds of generated files should land. Honours the dry-run flag like the
+## per-folder conversion, and dry runs log the full source-to-target mapping
+## so a bulk write can be checked before it happens.
+func _on_convert_project() -> void:
+	var export_root := _trim_slashes(_export.text.strip_edges())
+	if export_root.is_empty():
+		_status.text = "[color=yellow]Set the export folder first (saved to %s when you commit the field).[/color]" % Config.EXPORT_PATH
+		return
+
+	var dirs := _source_dirs(export_root)
+	var files := PackedStringArray()
+	for d in dirs:
+		var here := _list_mtlx(d)
+		here.sort()
+		files.append_array(here)
+	if files.is_empty():
+		_status.text = "[color=yellow]No .mtlx files found in the project outside %s.[/color]" % export_root
+		return
+
+	# Name every target before converting anything, so dry and real runs map
+	# identically and the log can show exact destinations.
+	var used := {}
+	var targets := PackedStringArray()
+	var renamed := 0
+	for src in files:
+		var target := _target_for(src, export_root, used)
+		if target.get_file() != src.get_file().get_basename() + ".tres":
+			renamed += 1
+		targets.append(target)
+
+	if not _dry_run:
+		DirAccess.make_dir_recursive_absolute(export_root)
+
+	_log.clear()
+	var written := 0
+	var failed := 0
+	for i in files.size():
+		if _dry_run:
+			_log.text += "[color=grey]%s -> %s[/color]\n" % [
+				files[i].trim_prefix("res://"), targets[i].trim_prefix("res://")]
+		var result: MtlxEmitter.Result = _convert_and_save(files[i], targets[i], _dry_run)
+		if result == null:
+			failed += 1
+			continue
+		written += 1
+		_log_result(files[i], result)
+
+	var verb: String = "would convert" if _dry_run else "converted"
+	_status.text = "%s %d material(s) into %s: %d failed, %d renamed for duplicate names." % [
+		verb, written, export_root, failed, renamed]
+	if _dry_run:
+		_status.text += "\n[color=yellow]Preview only.[/color]"
+
+	if not _dry_run:
+		_rescan()
+
+
+## Every folder the project-wide conversion may read .mtlx files from.
+##
+## Prefers the editor's FileSystem index, which is authoritative about the
+## project, and walks the filesystem for when the dock runs without a plugin
+## (a test, or the plugin is disabled). res://addons and anything under the
+## export folder are dropped either way: another addon's files are not this
+## project's materials, and the conversion must never re-read its own output
+## area.
+func _source_dirs(export_root: String) -> PackedStringArray:
+	var dirs := PackedStringArray()
+	if plugin != null and plugin.has_method("material_dirs"):
+		dirs = plugin.material_dirs()
+	else:
+		_scan_material_dirs("res://", dirs)
+		dirs.sort()
+	var out := PackedStringArray()
+	for d in dirs:
+		if d == export_root or (export_root != "" and d.begins_with(export_root + "/")):
+			continue
+		if d == "res://addons" or d.begins_with("res://addons/"):
+			continue
+		out.append(d)
+	return out
+
+
+## Recursive fallback scan for folders holding .mtlx files at their top
+## level. Hidden directories are skipped -- including .godot and .git, which
+## are not project content and can be large.
+func _scan_material_dirs(dir_path: String, out: PackedStringArray) -> void:
+	var d: DirAccess = DirAccess.open(dir_path)
+	if d == null:
+		return
+	for f in d.get_files():
+		if f.get_extension().to_lower() == "mtlx":
+			out.append(dir_path)
+			break
+	for sub in d.get_directories():
+		if sub.begins_with("."):
+			continue
+		_scan_material_dirs(dir_path.path_join(sub), out)
+
+
+## A source's flat output path: export folder plus its basename, however deep
+## the source sits. A basename already claimed gets a numbered suffix --
+## keeping every source converting, none overwriting another, and names
+## readable in the FileSystem dock. `used` gains the returned path.
+static func _target_for(src: String, export_root: String, used: Dictionary) -> String:
+	var base := src.get_file().get_basename()
+	var target := export_root.path_join(base + ".tres")
+	var n := 1
+	while used.has(target):
+		n += 1
+		target = export_root.path_join(base + "-%d.tres" % n)
+	used[target] = true
+	return target
+
+
+## Rescans the FileSystem if there is one to rescan. Headless runs (the
+## checks) have no editor filesystem and skip; in the editor a rescan is what
+## makes the new .tres appear and preview.
+func _rescan() -> void:
+	if Engine.is_editor_hint() and EditorInterface.get_resource_filesystem() != null:
 		EditorInterface.get_resource_filesystem().scan()
+
 
 func _on_fix_imports() -> void:
 	var dir: String = _folder.text.strip_edges()
@@ -360,4 +549,4 @@ func _on_fix_imports() -> void:
 	_status.text = "%s %d texture import setting(s)." % [
 		"would change" if _dry_run else "changed", changed]
 	if not _dry_run:
-		EditorInterface.get_resource_filesystem().scan()
+		_rescan()

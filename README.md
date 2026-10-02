@@ -54,6 +54,7 @@ All optional; the defaults work with no configuration.
 | `materialx/custom_lighting` | `true` | Evaluate `diffuse_roughness` with an Oren-Nayar lobe — and `sheen` with MaterialX's actual sheen lobe — inside a custom light function. On by default because those lobes are MaterialX's own answer and Godot has no equivalent; turning it off falls back to Godot's Lambert and rim. See [Oren-Nayar diffuse](#oren-nayar-diffuse) for what this costs. |
 | `materialx/screen_space_refraction` | `false` | Render `transmission` as real refraction of the scene behind the surface, instead of fading it out with `ALPHA`. The surface joins the transparent pass, dims itself by the amount of background it shows, and the displaced sample is masked against the depth buffer. Tunables per material: `refraction_strength` (offset size) and `refraction_softness` (mask blend width). |
 | `materialx/materials_folder` | `""` | The folder the dock's Source folder field starts on. Empty auto-detects a folder holding `.mtlx` files; the dock saves the field here when you commit it (Enter, or clicking elsewhere), so the next session reopens on your choice. Clearing the field returns to auto-detect. |
+| `materialx/export_path` | `""` | Where **Convert project to export folder** writes materials: every `.mtlx` in the project becomes a flat `<basename>.tres` here, however deep the source sits. Empty disables the conversion. Duplicate basenames get a numbered suffix (`Wall-2.tres`) in scan order, never an overwrite. `res://addons` and the export folder itself are never treated as sources. |
 
 Materials with a non-zero `diffuse_roughness` have Godot's whole lighting model
 replaced in the light stage, so for those the addon, not the engine, is
@@ -77,6 +78,13 @@ Enter, or clicking elsewhere — saves it, so the dock reopens where you left it
 
 - **Convert .mtlx to .tres** — batch-convert a folder. This is the path to use
   for an exported build (see below).
+- **Convert project to export folder** — convert *every* `.mtlx` in the project
+  into one flat folder of `ShaderMaterial` `.tres` (the `materialx/export_path`
+  setting). Sources stay where they are and nothing is written next to them,
+  so the export folder reads as a clean library of materials the FileSystem
+  dock previews by itself — the folder to scan by eye, not the source tree.
+  Re-running overwrites its own outputs, so it doubles as a rebuild when the
+  converter improves.
 - **Repair texture imports** — fix the import settings of the textures a
   material references. A colour map used as `base_color` needs sRGB decoding; a
   tangent-space normal map needs BC5 compression. Getting these wrong makes

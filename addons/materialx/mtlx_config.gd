@@ -74,6 +74,16 @@ const SCREEN_SPACE_REFRACTION := PREFIX + "screen_space_refraction"
 ## re-guessing every session. A saved folder that no longer exists falls back
 ## to auto-detect rather than pointing the dock at nothing.
 const MATERIALS_FOLDER := PREFIX + "materials_folder"
+## The folder project-wide conversion writes its .tres into, saved per project.
+##
+## Empty means disabled: the conversion asks for a folder rather than guessing
+## where hundreds of generated materials should land. Output is flat — every
+## .mtlx becomes <here>/<basename>.tres, however deep in the project it sits —
+## because the point of the folder is to be the one place to browse every
+## converted material with the editor's own material-ball previews, with no
+## .mtlx sources mixed in. Duplicate basenames get a numbered suffix rather
+## than a missing or overwritten file.
+const EXPORT_PATH := PREFIX + "export_path"
 
 ## Settings the removed thumbnail pipeline read. A key that no longer reads
 ## anything is worse than an absent one -- it looks configurable and is not --
@@ -111,6 +121,10 @@ static func install_defaults() -> bool:
 		"type": TYPE_BOOL,
 	}) or wrote
 	wrote = _set_if_missing(MATERIALS_FOLDER, "", {
+		"type": TYPE_STRING,
+		"hint": PROPERTY_HINT_DIR,
+	}) or wrote
+	wrote = _set_if_missing(EXPORT_PATH, "", {
 		"type": TYPE_STRING,
 		"hint": PROPERTY_HINT_DIR,
 	}) or wrote
@@ -171,3 +185,7 @@ static func screen_space_refraction() -> bool:
 
 static func materials_folder() -> String:
 	return str(ProjectSettings.get_setting(MATERIALS_FOLDER, ""))
+
+
+static func export_path() -> String:
+	return str(ProjectSettings.get_setting(EXPORT_PATH, ""))
